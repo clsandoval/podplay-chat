@@ -1,6 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ToolUseBlock } from './ToolUseBlock';
+import { ToolUseSummary } from './ToolUseBlock';
 import { cn } from '@/lib/utils';
 
 export interface ToolUse {
@@ -80,15 +80,10 @@ export function MessageBubble({ message, userInitials }: MessageBubbleProps) {
           )}
         </div>
 
-        {/* Tool use blocks */}
-        {message.toolUses?.map((tool) => (
-          <ToolUseBlock
-            key={tool.id}
-            toolName={tool.name}
-            input={tool.input}
-            result={tool.result}
-          />
-        ))}
+        {/* Tool use summary — all calls collapsed into one line */}
+        {message.toolUses && message.toolUses.length > 0 && (
+          <ToolUseSummary tools={message.toolUses} />
+        )}
       </div>
     </div>
   );
