@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { authMiddleware, type AuthEnv } from './middleware/auth.js';
 import { sessions } from './routes/sessions.js';
 import { stream } from './routes/stream.js';
+import { github } from './routes/github.js';
 
 const app = new Hono();
 
@@ -17,6 +18,7 @@ api.get('/me', (c) => {
 
 api.route('/sessions', sessions);
 api.route('/sessions', stream);
+api.route('/github', github);
 
 app.route('/api', api);
 
