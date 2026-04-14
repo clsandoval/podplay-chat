@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useState, useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
-import matter from 'gray-matter';
+import { parseFrontmatter } from '@/lib/frontmatter';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { fetchDirectory, fetchFile } from '@/lib/github';
 
@@ -41,7 +41,7 @@ function FinancialsPage() {
           if (file.type !== 'file' || !file.name.endsWith('.md')) continue;
           try {
             const content = await fetchFile(`data/invoices/${file.name}`);
-            const { data: fm } = matter(content);
+            const { data: fm } = parseFrontmatter(content);
             invData.push({
               name: fm.name ?? file.name.replace('.md', ''),
               amount: fm.amount ?? '-',
@@ -63,7 +63,7 @@ function FinancialsPage() {
           if (file.type !== 'file' || !file.name.endsWith('.md')) continue;
           try {
             const content = await fetchFile(`data/expenses/${file.name}`);
-            const { data: fm } = matter(content);
+            const { data: fm } = parseFrontmatter(content);
             expData.push({
               name: fm.name ?? file.name.replace('.md', ''),
               amount: fm.amount ?? '-',

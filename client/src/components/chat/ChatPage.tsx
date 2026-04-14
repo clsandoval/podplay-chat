@@ -37,6 +37,14 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const currentAgentMessageRef = useRef<string | null>(null);
 
+  // Reset state when switching between sessions (same route, different params)
+  useEffect(() => {
+    setMessages([]);
+    setSessionStatus(null);
+    currentAgentMessageRef.current = null;
+    setSessionId(initialSessionId ?? null);
+  }, [initialSessionId]);
+
   // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
