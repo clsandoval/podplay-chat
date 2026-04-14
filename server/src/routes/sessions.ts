@@ -1,0 +1,138 @@
+import { Hono } from 'hono';
+import type { AuthEnv } from '../middleware/auth.js';
+import { supabase } from '../lib/supabase.js';
+import * as anthropic from '../lib/anthropic.js';
+
+const sessions = new Hono<AuthEnv>();
+
+// List user's sessions
+sessions.get('/', async (c) => {
+  const userId = c.get('userId');
+  const { data, error } = await supabase
+    .from('chat_sessions')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('status', 'active')
+    .order('last_message_at', { ascending: false, nullsFirst: false });
+
+  if (error) return c.json({ error: error.message }, 500);
+  return c.json(data);
+});
+
+// Create a new session
+sessions.post('/', async (c) => {
+  const userId = c.get('userId');
+
+  let session;
+  try {
+    session = await anthropic.createSession(
+      process.env.AGENT_ID!,
+      Number(process.env.AGENT_VERSION!),
+      process.env.ENVIRONMENT_ID!,
+      process.env.VAULT_ID!,
+      process.env.GITHUB_TOKEN!,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    return c.json({ error: `Failed to create agent session: ${message}` }, 502);
+  }
+
+  const { error } = await supabase.from('chat_sessions').insert({
+    user_id: userId,
+    session_id: session.id,
+    agent_id: process.env.AGENT_ID!,
+    status: 'active',
+  });
+
+  if (error) return c.json({ error: error.message }, 500);
+
+  // Open durable SSE connection (stream-first per API docs)
+  // SessionManager is defined in Task 10
+  const { sessionManager } = await import('../lib/session-manager.js');
+  sessionManager.connect(session.id);
+
+  return c.json({ sessionId: session.id }, 201);
+});
+
+// Send a message
+sessions.post('/:id/messages', async (c) => {
+  const sessionId = c.req.param('id');
+  const { text } = await c.req.json<{ text: string }>();
+
+  if (!text?.trim()) return c.json({ error: 'text is required' }, 400);
+
+  // Verify session belongs to user
+  const userId = c.get('userId');
+  const { data: row } = await supabase
+    .from('chat_sessions')
+    .select('session_id')
+    .eq('session_id', sessionId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!row) return c.json({ error: 'Session not found' }, 404);
+
+  await anthropic.sendMessage(sessionId, text);
+
+  // Update last_message_at
+  await supabase
+    .from('chat_sessions')
+    .update({ last_message_at: new Date().toISOString() })
+    .eq('session_id', sessionId);
+
+  return c.json({ status: 'sent' }, 202);
+});
+
+// Get chat history
+sessions.get('/:id/history', async (c) => {
+  const sessionId = c.req.param('id');
+  const userId = c.get('userId');
+
+  const { data: row } = await supabase
+    .from('chat_sessions')
+    .select('session_id')
+    .eq('session_id', sessionId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!row) return c.json({ error: 'Session not found' }, 404);
+
+  const events = await anthropic.listEvents(sessionId);
+
+  // Filter to conversation-relevant events
+  const relevant = events.data.filter((e: any) =>
+    ['user.message', 'agent.message', 'agent.tool_use', 'agent.tool_result',
+     'agent.mcp_tool_use', 'agent.mcp_tool_result'].includes(e.type)
+  );
+
+  return c.json(relevant);
+});
+
+// Archive a session
+sessions.delete('/:id', async (c) => {
+  const sessionId = c.req.param('id');
+  const userId = c.get('userId');
+
+  const { data: row } = await supabase
+    .from('chat_sessions')
+    .select('session_id')
+    .eq('session_id', sessionId)
+    .eq('user_id', userId)
+    .single();
+
+  if (!row) return c.json({ error: 'Session not found' }, 404);
+
+  // Disconnect the in-memory SSE connection before archiving
+  const { sessionManager } = await import('../lib/session-manager.js');
+  sessionManager.disconnect(sessionId);
+
+  await anthropic.archiveSession(sessionId);
+  await supabase
+    .from('chat_sessions')
+    .update({ status: 'archived' })
+    .eq('session_id', sessionId);
+
+  return c.json({ status: 'archived' });
+});
+
+export { sessions };

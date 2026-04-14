@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { authMiddleware, type AuthEnv } from './middleware/auth.js';
+import { sessions } from './routes/sessions.js';
 
 const app = new Hono();
 
@@ -12,6 +13,8 @@ api.use('*', authMiddleware);
 api.get('/me', (c) => {
   return c.json({ userId: c.get('userId'), email: c.get('userEmail') });
 });
+
+api.route('/sessions', sessions);
 
 app.route('/api', api);
 
