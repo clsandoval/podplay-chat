@@ -14,65 +14,98 @@ export type AgentEvent = {
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 
+/**
+ * SSE hook — caller is responsible for calling connectTo(sessionId).
+ * No auto-connect: avoids duplicate connections from React StrictMode
+ * and from racing with explicit connectTo calls in handleSend.
+ */
 export function useEventStream(
-  sessionId: string | null,
   onEvent: (event: AgentEvent) => void,
 ) {
   const eventSourceRef = useRef<EventSource | null>(null);
-  // Store onEvent in a ref to avoid reconnection churn when the callback
-  // reference changes on re-render.
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>('disconnected');
+  // Guards against concurrent async connectTo calls leaking EventSources
+  const connectGenRef = useRef(0);
 
-  const connect = useCallback(async () => {
-    if (!sessionId) return;
+  const close = useCallback(() => {
+    connectGenRef.current++;
+    if (eventSourceRef.current) {
+      console.log('[SSE] Closing connection');
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    setConnectionStatus('disconnected');
+  }, []);
 
+  // Connect to a specific session — returns a promise that resolves when open
+  const connectTo = useCallback(async (sid: string): Promise<void> => {
+    close();
+
+    const gen = connectGenRef.current;
     setConnectionStatus('connecting');
+    console.log(`[SSE] Connecting to session ${sid}...`);
 
     const { data } = await supabase.auth.getSession();
+
+    // Another connectTo was called while we awaited — bail out
+    if (gen !== connectGenRef.current) {
+      console.log('[SSE] Stale connect, aborting');
+      return;
+    }
+
     const token = data.session?.access_token;
-    if (!token) return;
+    if (!token) {
+      console.error('[SSE] No auth token available');
+      setConnectionStatus('disconnected');
+      return;
+    }
 
     const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001';
-    const url = `${apiUrl}/api/sessions/${sessionId}/stream?token=${encodeURIComponent(token)}`;
+    const url = `${apiUrl}/api/sessions/${sid}/stream?token=${encodeURIComponent(token)}`;
 
-    const es = new EventSource(url);
+    return new Promise<void>((resolve) => {
+      if (gen !== connectGenRef.current) { resolve(); return; }
 
-    es.onopen = () => {
-      setConnectionStatus('connected');
-    };
+      const es = new EventSource(url);
 
-    // The proxy sends all events as `event: message`. EventSource.onmessage
-    // handles events named "message", so this receives everything.
-    es.onmessage = (e) => {
-      try {
-        const event: AgentEvent = JSON.parse(e.data);
-        onEventRef.current(event);
-      } catch {
-        // ignore non-JSON messages
-      }
-    };
+      es.onopen = () => {
+        if (gen !== connectGenRef.current) { es.close(); resolve(); return; }
+        console.log(`[SSE] Connected to session ${sid}`);
+        setConnectionStatus('connected');
+        resolve();
+      };
 
-    es.onerror = () => {
-      setConnectionStatus('disconnected');
-      // EventSource auto-reconnects
-    };
+      es.onmessage = (e) => {
+        try {
+          const event: AgentEvent = JSON.parse(e.data);
+          console.log(`[SSE] ${event.type}`);
+          onEventRef.current(event);
+        } catch {
+          // ignore non-JSON
+        }
+      };
 
-    eventSourceRef.current = es;
-  }, [sessionId]); // onEvent excluded — accessed via ref
+      es.onerror = () => {
+        if (gen !== connectGenRef.current) return;
+        console.warn('[SSE] Connection error, auto-reconnecting...');
+        setConnectionStatus('disconnected');
+      };
 
+      eventSourceRef.current = es;
+    });
+  }, [close]);
+
+  // Clean up on unmount only
   useEffect(() => {
-    connect();
-    return () => {
-      eventSourceRef.current?.close();
-      setConnectionStatus('disconnected');
-    };
-  }, [connect]);
+    return () => close();
+  }, [close]);
 
   return {
     connectionStatus,
-    close: () => eventSourceRef.current?.close(),
+    connectTo,
+    close,
   };
 }

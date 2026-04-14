@@ -13,6 +13,8 @@ type SessionStatus = 'idle' | 'running' | 'terminated' | null;
 
 interface ChatPageProps {
   sessionId?: string;
+  /** True when this session was just created — skip history loading, rely on SSE */
+  fresh?: boolean;
 }
 
 let messageCounter = 0;
@@ -20,7 +22,7 @@ function nextId() {
   return `msg-${++messageCounter}-${Date.now()}`;
 }
 
-export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
+export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) {
   const { user } = useAuth();
   const navigate = useNavigate();
   const userInitials = user?.email ? user.email.slice(0, 2).toUpperCase() : 'U';
@@ -40,9 +42,192 @@ export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, sessionStatus]);
 
-  // Load history when resuming a session
+  // Handle SSE events
+  //
+  // IMPORTANT: Never mutate currentAgentMessageRef inside a setMessages
+  // updater function. React StrictMode double-invokes updaters, and ref
+  // mutations from the first invocation corrupt the second invocation's
+  // logic. Pattern: set the ref BEFORE calling setMessages.
+  const handleEvent = useCallback(
+    (event: AgentEvent) => {
+      switch (event.type) {
+        // Handle user.message echo from SSE (needed after route remount
+        // for fresh sessions where we skip history loading)
+        case 'user.message': {
+          const text =
+            event.content
+              ?.filter((c: any) => c.type === 'text')
+              .map((c: any) => c.text)
+              .join('') ?? '';
+          if (!text) break;
+
+          const eventId = event.id ?? nextId();
+          setMessages((prev) => {
+            // Don't add duplicate user messages
+            if (prev.some((m) => m.role === 'user' && m.content === text)) {
+              return prev;
+            }
+            return [...prev, { id: eventId, role: 'user' as const, content: text }];
+          });
+          break;
+        }
+
+        case 'agent.message': {
+          const text =
+            event.content
+              ?.filter((c: any) => c.type === 'text')
+              .map((c: any) => c.text)
+              .join('') ?? '';
+
+          let agentId = currentAgentMessageRef.current;
+          if (!agentId) {
+            agentId = nextId();
+            currentAgentMessageRef.current = agentId;
+          }
+          const targetId = agentId;
+
+          setMessages((prev) => {
+            const existing = prev.find((m) => m.id === targetId);
+            if (existing) {
+              return prev.map((m) =>
+                m.id === targetId ? { ...m, content: m.content + text } : m,
+              );
+            }
+            return [
+              ...prev,
+              { id: targetId, role: 'agent' as const, content: text, toolUses: [] },
+            ];
+          });
+          break;
+        }
+
+        case 'agent.tool_use':
+        case 'agent.mcp_tool_use': {
+          const toolUse: ToolUse = {
+            id: event.id ?? nextId(),
+            name: event.name ?? event.tool_name ?? 'unknown',
+            input: event.input,
+          };
+
+          let agentId = currentAgentMessageRef.current;
+          if (!agentId) {
+            agentId = nextId();
+            currentAgentMessageRef.current = agentId;
+          }
+          const targetId = agentId;
+
+          setMessages((prev) => {
+            const existing = prev.find((m) => m.id === targetId);
+            if (existing) {
+              return prev.map((m) =>
+                m.id === targetId
+                  ? { ...m, toolUses: [...(m.toolUses ?? []), toolUse] }
+                  : m,
+              );
+            }
+            return [
+              ...prev,
+              { id: targetId, role: 'agent' as const, content: '', toolUses: [toolUse] },
+            ];
+          });
+          break;
+        }
+
+        case 'agent.tool_result':
+        case 'agent.mcp_tool_result': {
+          const targetId = currentAgentMessageRef.current;
+          if (!targetId) break;
+
+          setMessages((prev) =>
+            prev.map((m) => {
+              if (m.id !== targetId) return m;
+              const tools = [...(m.toolUses ?? [])];
+              if (tools.length > 0) {
+                tools[tools.length - 1] = {
+                  ...tools[tools.length - 1],
+                  result: event.content,
+                };
+              }
+              return { ...m, toolUses: tools };
+            }),
+          );
+          break;
+        }
+
+        case 'session.status_running':
+          setSessionStatus('running');
+          break;
+
+        case 'session.status_idle': {
+          const stopReason = event.stop_reason?.type;
+          if (stopReason === 'end_turn') {
+            setSessionStatus('idle');
+            currentAgentMessageRef.current = null;
+          } else if (stopReason === 'requires_action') {
+            setSessionStatus('idle');
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: nextId(),
+                role: 'system',
+                content: 'The agent requires additional action to continue.',
+              },
+            ]);
+          } else if (stopReason === 'retries_exhausted') {
+            setSessionStatus('idle');
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: nextId(),
+                role: 'system',
+                content: 'The agent encountered repeated errors and stopped.',
+              },
+            ]);
+          } else {
+            setSessionStatus('idle');
+            currentAgentMessageRef.current = null;
+          }
+          break;
+        }
+
+        case 'session.status_terminated':
+          setSessionStatus('terminated');
+          currentAgentMessageRef.current = null;
+          break;
+
+        case 'session.error':
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: nextId(),
+              role: 'system',
+              content: `Something went wrong: ${event.error ?? 'Unknown error'}`,
+            },
+          ]);
+          break;
+
+        default:
+          break;
+      }
+    },
+    [],
+  );
+
+  // SSE hook — must be called before effects that use connectTo
+  const { connectionStatus, connectTo } = useEventStream(handleEvent);
+
+  // Load history + connect SSE when resuming a session.
+  // For fresh sessions (just created), skip history — SSE delivers everything
+  // including the user.message echo.
   useEffect(() => {
     if (!initialSessionId) return;
+
+    connectTo(initialSessionId);
+
+    if (fresh) {
+      // Fresh session: SSE stream will deliver user.message echo + agent response
+      return;
+    }
 
     getHistory(initialSessionId)
       .then((history) => {
@@ -111,153 +296,20 @@ export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
         if (currentAgent) {
           restored.push(currentAgent);
         }
-        setMessages(restored);
+        // Merge: if SSE already delivered an agent message, keep SSE state
+        setMessages((prev) => {
+          const hasAgent = prev.some((m) => m.role === 'agent');
+          if (hasAgent) return prev;
+          return restored;
+        });
         setSessionStatus('idle');
       })
       .catch(() => {
         toast.error('Failed to load conversation history.');
       });
-  }, [initialSessionId]);
-
-  // Handle SSE events
-  const handleEvent = useCallback(
-    (event: AgentEvent) => {
-      switch (event.type) {
-        case 'agent.message': {
-          const text =
-            event.content
-              ?.filter((c: any) => c.type === 'text')
-              .map((c: any) => c.text)
-              .join('') ?? '';
-
-          setMessages((prev) => {
-            const agentId = currentAgentMessageRef.current;
-            if (agentId) {
-              return prev.map((m) =>
-                m.id === agentId ? { ...m, content: m.content + text } : m,
-              );
-            }
-            const newId = nextId();
-            currentAgentMessageRef.current = newId;
-            return [
-              ...prev,
-              { id: newId, role: 'agent' as const, content: text, toolUses: [] },
-            ];
-          });
-          break;
-        }
-
-        case 'agent.tool_use':
-        case 'agent.mcp_tool_use': {
-          const toolUse: ToolUse = {
-            id: event.id ?? nextId(),
-            name: event.name ?? event.tool_name ?? 'unknown',
-            input: event.input,
-          };
-
-          setMessages((prev) => {
-            const agentId = currentAgentMessageRef.current;
-            if (agentId) {
-              return prev.map((m) =>
-                m.id === agentId
-                  ? { ...m, toolUses: [...(m.toolUses ?? []), toolUse] }
-                  : m,
-              );
-            }
-            const newId = nextId();
-            currentAgentMessageRef.current = newId;
-            return [
-              ...prev,
-              { id: newId, role: 'agent' as const, content: '', toolUses: [toolUse] },
-            ];
-          });
-          break;
-        }
-
-        case 'agent.tool_result':
-        case 'agent.mcp_tool_result': {
-          setMessages((prev) => {
-            const agentId = currentAgentMessageRef.current;
-            if (!agentId) return prev;
-            return prev.map((m) => {
-              if (m.id !== agentId) return m;
-              const tools = [...(m.toolUses ?? [])];
-              if (tools.length > 0) {
-                tools[tools.length - 1] = {
-                  ...tools[tools.length - 1],
-                  result: event.content,
-                };
-              }
-              return { ...m, toolUses: tools };
-            });
-          });
-          break;
-        }
-
-        case 'session.status_running':
-          setSessionStatus('running');
-          break;
-
-        case 'session.status_idle': {
-          const stopReason = event.stop_reason?.type;
-          if (stopReason === 'end_turn') {
-            setSessionStatus('idle');
-            currentAgentMessageRef.current = null;
-          } else if (stopReason === 'requires_action') {
-            setSessionStatus('idle');
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: nextId(),
-                role: 'system',
-                content: 'The agent requires additional action to continue.',
-              },
-            ]);
-          } else if (stopReason === 'retries_exhausted') {
-            setSessionStatus('idle');
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: nextId(),
-                role: 'system',
-                content: 'The agent encountered repeated errors and stopped.',
-              },
-            ]);
-          } else {
-            setSessionStatus('idle');
-            currentAgentMessageRef.current = null;
-          }
-          break;
-        }
-
-        case 'session.status_terminated':
-          setSessionStatus('terminated');
-          currentAgentMessageRef.current = null;
-          break;
-
-        case 'session.error':
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextId(),
-              role: 'system',
-              content: `Something went wrong: ${event.error ?? 'Unknown error'}`,
-            },
-          ]);
-          break;
-
-        // agent.thinking, span.* — ignore
-        default:
-          break;
-      }
-    },
-    [],
-  );
-
-  const { connectionStatus } = useEventStream(sessionId, handleEvent);
+  }, [initialSessionId, connectTo, fresh]);
 
   async function handleSend(text: string) {
-    // Optimistically add user message
     const userMsg: Message = { id: nextId(), role: 'user', content: text };
     setMessages((prev) => [...prev, userMsg]);
     currentAgentMessageRef.current = null;
@@ -269,18 +321,24 @@ export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
         const { sessionId: newId } = await createSession();
         sid = newId;
         setSessionId(newId);
-        // Navigate to the new session URL
+
+        await connectTo(newId);
+        await sendMessage(newId, text);
+
+        // Navigate AFTER message is sent. The new component will mount
+        // with fresh=true, skip history loading, and get events via SSE
+        // (including the user.message echo and agent response).
         void navigate({
           to: '/chat/$sessionId',
           params: { sessionId: newId },
+          search: { fresh: true },
           replace: true,
         });
       } catch {
         toast.error("Couldn't start a chat session. Try again.");
-        setIsCreatingSession(false);
-        return;
       }
       setIsCreatingSession(false);
+      return;
     }
 
     try {
@@ -297,7 +355,6 @@ export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
 
   return (
     <div className="flex flex-1 flex-col h-full">
-      {/* Connection banner */}
       {connectionStatus === 'disconnected' && sessionId && (
         <div className="flex items-center justify-center gap-2 bg-destructive/10 border-b border-destructive/30 px-4 py-2 text-sm text-destructive">
           <WifiOff className="h-4 w-4" />
@@ -305,9 +362,8 @@ export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
         </div>
       )}
 
-      {/* Messages area */}
       <div className="flex-1 overflow-y-auto py-6 space-y-6">
-        {messages.length === 0 && (
+        {messages.length === 0 && !isCreatingSession && (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             <p>Start a conversation with PodPlay.</p>
           </div>
@@ -319,7 +375,7 @@ export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
             userInitials={userInitials}
           />
         ))}
-        {sessionStatus === 'running' && <TypingIndicator />}
+        {(sessionStatus === 'running' || isCreatingSession) && <TypingIndicator />}
         {sessionStatus === 'terminated' && (
           <div className="max-w-[800px] mx-auto px-4">
             <div className="rounded-md border bg-muted px-3 py-2 text-sm text-muted-foreground text-center">
@@ -333,7 +389,6 @@ export function ChatPage({ sessionId: initialSessionId }: ChatPageProps) {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input bar */}
       <ChatInput onSend={handleSend} disabled={inputDisabled} />
     </div>
   );
