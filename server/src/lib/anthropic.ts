@@ -45,9 +45,9 @@ export async function listEvents(sessionId: string) {
   let url: string | null = `${BASE_URL}/sessions/${sessionId}/events`;
 
   while (url) {
-    const res = await fetch(url, { headers: headers() });
+    const res: Response = await fetch(url, { headers: headers() });
     if (!res.ok) throw new Error(`List events failed: ${res.status} ${await res.text()}`);
-    const page = await res.json();
+    const page: any = await res.json();
     allEvents.push(...(page.data ?? []));
     url = page.next_page ?? null;
   }

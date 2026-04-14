@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { cors } from 'hono/cors';
 import { serve } from '@hono/node-server';
 import { authMiddleware, type AuthEnv } from './middleware/auth.js';
 import { sessions } from './routes/sessions.js';
@@ -11,6 +12,11 @@ import { sessionManager } from './lib/session-manager.js';
 const app = new Hono();
 
 app.get('/health', (c) => c.json({ status: 'ok' }));
+
+app.use('/api/*', cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true,
+}));
 
 const api = new Hono<AuthEnv>();
 api.use('*', authMiddleware);
