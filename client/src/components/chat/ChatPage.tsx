@@ -4,10 +4,12 @@ import { toast } from 'sonner';
 import { WifiOff } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { createSession, sendMessage, getHistory } from '@/lib/api';
+import { uploadFiles, validateFile, type PendingFile } from '@/lib/file-upload';
 import { useEventStream, type AgentEvent } from '@/hooks/useEventStream';
-import { MessageBubble, type Message, type ToolUse } from './MessageBubble';
-import { ChatInput } from './ChatInput';
+import { MessageBubble, type Message, type MessageAttachment, type ToolUse } from './MessageBubble';
+import { ChatInput, type ChatInputHandle } from './ChatInput';
 import { TypingIndicator } from './TypingIndicator';
+import { DropOverlay } from './DropOverlay';
 
 type SessionStatus = 'idle' | 'running' | 'terminated' | null;
 
@@ -36,6 +38,9 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const currentAgentMessageRef = useRef<string | null>(null);
+  const chatInputRef = useRef<ChatInputHandle>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
 
   // Reset state when switching between sessions (same route, different params)
   useEffect(() => {
@@ -317,8 +322,63 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
       });
   }, [initialSessionId, connectTo, fresh]);
 
-  async function handleSend(text: string) {
-    const userMsg: Message = { id: nextId(), role: 'user', content: text };
+  // Drag-and-drop handlers
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    const valid: File[] = [];
+    for (const file of droppedFiles) {
+      const error = validateFile(file, valid.length);
+      if (error) {
+        toast.error(error);
+      } else {
+        valid.push(file);
+      }
+    }
+
+    if (valid.length > 0) {
+      chatInputRef.current?.addFiles(valid);
+    }
+  }, []);
+
+  async function handleSend(text: string, pendingFiles: PendingFile[]) {
+    // Build local message with attachment previews
+    const localAttachments: MessageAttachment[] = pendingFiles.map((pf) => ({
+      fileName: pf.file.name,
+      mimeType: pf.file.type,
+      url: pf.previewUrl || '',
+      size: pf.file.size,
+    }));
+
+    const userMsg: Message = {
+      id: nextId(),
+      role: 'user',
+      content: text,
+      attachments: localAttachments.length > 0 ? localAttachments : undefined,
+    };
     setMessages((prev) => [...prev, userMsg]);
     currentAgentMessageRef.current = null;
 
@@ -331,11 +391,22 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         setSessionId(newId);
 
         await connectTo(newId);
-        await sendMessage(newId, text);
 
-        // Navigate AFTER message is sent. The new component will mount
-        // with fresh=true, skip history loading, and get events via SSE
-        // (including the user.message echo and agent response).
+        // Upload files if any
+        let attachments;
+        if (pendingFiles.length > 0) {
+          try {
+            attachments = await uploadFiles(pendingFiles, user!.id, newId);
+          } catch (err) {
+            toast.error(
+              err instanceof Error ? err.message : 'File upload failed',
+            );
+            return;
+          }
+        }
+
+        await sendMessage(newId, text, attachments);
+
         void navigate({
           to: '/chat/$sessionId',
           params: { sessionId: newId },
@@ -350,7 +421,19 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     }
 
     try {
-      await sendMessage(sid, text);
+      let attachments;
+      if (pendingFiles.length > 0) {
+        try {
+          attachments = await uploadFiles(pendingFiles, user!.id, sid);
+        } catch (err) {
+          toast.error(
+            err instanceof Error ? err.message : 'File upload failed',
+          );
+          return;
+        }
+      }
+
+      await sendMessage(sid, text, attachments);
     } catch {
       toast.error('Failed to send message. Try again.');
     }
@@ -362,7 +445,15 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     isCreatingSession;
 
   return (
-    <div className="flex flex-1 flex-col h-full">
+    <div
+      className="flex flex-1 flex-col h-full relative"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {isDragging && <DropOverlay />}
+
       {connectionStatus === 'disconnected' && sessionId && (
         <div className="flex items-center justify-center gap-2 bg-destructive/10 border-b border-destructive/30 px-4 py-2 text-sm text-destructive">
           <WifiOff className="h-4 w-4" />
@@ -397,7 +488,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         <div ref={messagesEndRef} />
       </div>
 
-      <ChatInput onSend={handleSend} disabled={inputDisabled} />
+      <ChatInput ref={chatInputRef} onSend={handleSend} disabled={inputDisabled} />
     </div>
   );
 }
