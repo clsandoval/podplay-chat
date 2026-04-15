@@ -18,7 +18,15 @@ export function AppLayout() {
 
   useEffect(() => {
     listSessions()
-      .then((data) => setSessions(data.slice(0, 10)))
+      .then((data) =>
+        setSessions(
+          data.slice(0, 10).map((s: any) => ({
+            sessionId: s.session_id,
+            title: s.title,
+            createdAt: s.created_at,
+          })),
+        ),
+      )
       .catch(() => {
         // silently fail — sidebar sessions are non-critical
       });

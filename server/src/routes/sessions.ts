@@ -22,6 +22,7 @@ sessions.get('/', async (c) => {
 // Create a new session
 sessions.post('/', async (c) => {
   const userId = c.get('userId');
+  console.log(`[Session] Creating session for user ${userId}`);
 
   let session;
   try {
@@ -44,10 +45,12 @@ sessions.post('/', async (c) => {
     status: 'active',
   });
 
-  if (error) return c.json({ error: error.message }, 500);
+  if (error) {
+    console.error(`[Session] Supabase insert error:`, error.message);
+    return c.json({ error: error.message }, 500);
+  }
 
-  // Open durable SSE connection (stream-first per API docs)
-  // SessionManager is defined in Task 10
+  console.log(`[Session] Created ${session.id}, opening SSE stream...`);
   const { sessionManager } = await import('../lib/session-manager.js');
   sessionManager.connect(session.id);
 
@@ -60,6 +63,7 @@ sessions.post('/:id/messages', async (c) => {
   const { text } = await c.req.json<{ text: string }>();
 
   if (!text?.trim()) return c.json({ error: 'text is required' }, 400);
+  console.log(`[Message] Sending to ${sessionId}: "${text.slice(0, 60)}..."`);
 
   // Verify session belongs to user
   const userId = c.get('userId');

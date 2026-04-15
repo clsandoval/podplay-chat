@@ -11,6 +11,11 @@ import { sessionManager } from './lib/session-manager.js';
 
 const app = new Hono();
 
+app.onError((err, c) => {
+  console.error('Unhandled error:', err);
+  return c.json({ error: err.message }, 500);
+});
+
 app.get('/health', (c) => c.json({ status: 'ok' }));
 
 app.use('/api/*', cors({
