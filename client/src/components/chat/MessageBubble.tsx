@@ -1,7 +1,44 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Download } from 'lucide-react';
 import { ToolUseSummary } from './ToolUseBlock';
+import { FileAttachmentDisplay } from './FileAttachmentDisplay';
 import { cn } from '@/lib/utils';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
+interface DetectedFile {
+  path: string;
+  name: string;
+}
+
+function detectFilesInToolResults(toolUses?: ToolUse[]): DetectedFile[] {
+  if (!toolUses) return [];
+  const files: DetectedFile[] = [];
+
+  for (const tool of toolUses) {
+    if (tool.name === 'push_files' || tool.name === 'create_or_update_file') {
+      if (tool.input?.files) {
+        for (const f of tool.input.files) {
+          if (f.path) {
+            files.push({
+              path: f.path,
+              name: f.path.split('/').pop() || f.path,
+            });
+          }
+        }
+      }
+      if (tool.input?.path) {
+        files.push({
+          path: tool.input.path,
+          name: tool.input.path.split('/').pop() || tool.input.path,
+        });
+      }
+    }
+  }
+
+  return files;
+}
 
 export interface ToolUse {
   id: string;
@@ -78,7 +115,17 @@ export function MessageBubble({ message, userInitials }: MessageBubbleProps) {
           )}
         >
           {isUser ? (
-            <p className="whitespace-pre-wrap">{message.content}</p>
+            <>
+              {message.content && (
+                <p className="whitespace-pre-wrap">{message.content}</p>
+              )}
+              {message.attachments && message.attachments.length > 0 && (
+                <FileAttachmentDisplay
+                  attachments={message.attachments}
+                  isUser={true}
+                />
+              )}
+            </>
           ) : (
             <div className="prose prose-sm max-w-none dark:prose-invert prose-p:leading-relaxed prose-pre:bg-background prose-pre:border prose-pre:rounded-md">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
@@ -87,6 +134,28 @@ export function MessageBubble({ message, userInitials }: MessageBubbleProps) {
             </div>
           )}
         </div>
+
+        {/* Agent file download links */}
+        {!isUser && (() => {
+          const detectedFiles = detectFilesInToolResults(message.toolUses);
+          if (detectedFiles.length === 0) return null;
+          return (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {detectedFiles.map((f) => (
+                <a
+                  key={f.path}
+                  href={`${API_URL}/api/github/${f.path}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                >
+                  <Download className="h-3 w-3" />
+                  <span className="truncate max-w-[160px]">{f.name}</span>
+                </a>
+              ))}
+            </div>
+          );
+        })()}
 
         {/* Tool use summary — all calls collapsed into one line */}
         {message.toolUses && message.toolUses.length > 0 && (
