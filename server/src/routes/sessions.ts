@@ -95,6 +95,22 @@ sessions.post('/:id/messages', async (c) => {
   if (attachments?.length) {
     const fileBlocks = await buildContentBlocks(attachments);
     content.push(...fileBlocks);
+
+    // Record attachments in the database
+    const rows = attachments.map((att) => ({
+      user_id: userId,
+      session_id: sessionId,
+      file_name: att.fileName,
+      file_path: att.storagePath,
+      mime_type: att.mimeType,
+      size_bytes: att.size,
+    }));
+    const { error: insertError } = await supabase
+      .from('chat_attachments')
+      .insert(rows);
+    if (insertError) {
+      console.error('[Message] Failed to record attachments:', insertError.message);
+    }
   }
 
   await anthropic.sendMessage(sessionId, content);
