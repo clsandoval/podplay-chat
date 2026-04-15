@@ -15,7 +15,8 @@
   "dependencies": {
     "@hono/node-server": "^1.19.14",
     "@supabase/supabase-js": "^2.103.0",
-    "hono": "^4.12.12"
+    "hono": "^4.12.12",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
