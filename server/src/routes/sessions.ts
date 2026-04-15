@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import type { AuthEnv } from '../middleware/auth.js';
 import { supabase } from '../lib/supabase.js';
 import * as anthropic from '../lib/anthropic.js';
+import type { ContentBlock } from '../lib/anthropic.js';
+import { buildContentBlocks, type FileAttachment } from '../lib/file-processing.js';
 
 const sessions = new Hono<AuthEnv>();
 
@@ -60,10 +62,19 @@ sessions.post('/', async (c) => {
 // Send a message
 sessions.post('/:id/messages', async (c) => {
   const sessionId = c.req.param('id');
-  const { text } = await c.req.json<{ text: string }>();
+  const { text, attachments } = await c.req.json<{
+    text: string;
+    attachments?: FileAttachment[];
+  }>();
 
-  if (!text?.trim()) return c.json({ error: 'text is required' }, 400);
-  console.log(`[Message] Sending to ${sessionId}: "${text.slice(0, 60)}..."`);
+  if (!text?.trim() && (!attachments || attachments.length === 0)) {
+    return c.json({ error: 'text or attachments required' }, 400);
+  }
+
+  console.log(
+    `[Message] Sending to ${sessionId}: "${(text || '').slice(0, 60)}..." ` +
+      `(${attachments?.length ?? 0} files)`,
+  );
 
   // Verify session belongs to user
   const userId = c.get('userId');
@@ -76,7 +87,17 @@ sessions.post('/:id/messages', async (c) => {
 
   if (!row) return c.json({ error: 'Session not found' }, 404);
 
-  await anthropic.sendMessage(sessionId, text);
+  // Build content blocks
+  const content: ContentBlock[] = [];
+  if (text?.trim()) {
+    content.push({ type: 'text', text });
+  }
+  if (attachments?.length) {
+    const fileBlocks = await buildContentBlocks(attachments);
+    content.push(...fileBlocks);
+  }
+
+  await anthropic.sendMessage(sessionId, content);
 
   // Update last_message_at
   await supabase
