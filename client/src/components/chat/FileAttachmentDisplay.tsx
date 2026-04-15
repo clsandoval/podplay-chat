@@ -24,9 +24,9 @@ export function FileAttachmentDisplay({
     <>
       {images.length > 0 && (
         <div className="flex flex-wrap gap-2 mt-1.5">
-          {images.map((att) => (
+          {images.map((att, i) => (
             <button
-              key={att.url}
+              key={`img-${att.fileName}-${i}`}
               type="button"
               onClick={() => setModalImage(att.url)}
               className="block rounded-md overflow-hidden border hover:opacity-80 transition-opacity"
@@ -43,9 +43,9 @@ export function FileAttachmentDisplay({
 
       {docs.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mt-1.5">
-          {docs.map((att) => (
+          {docs.map((att, i) => (
             <div
-              key={att.url}
+              key={`doc-${att.fileName}-${i}`}
               className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs ${
                 isUser
                   ? 'border-primary-foreground/20 text-primary-foreground/80'

@@ -11,6 +11,12 @@ export interface FileAttachment {
 
 const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 const TEXT_TYPES = ['text/csv', 'text/plain', 'text/markdown', 'text/yaml', 'application/json'];
+const ALL_ALLOWED_TYPES = [
+  ...IMAGE_TYPES,
+  ...TEXT_TYPES,
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+];
 
 export async function buildContentBlocks(
   attachments: FileAttachment[],
@@ -18,6 +24,14 @@ export async function buildContentBlocks(
   const blocks: ContentBlock[] = [];
 
   for (const att of attachments) {
+    if (!ALL_ALLOWED_TYPES.includes(att.mimeType)) {
+      blocks.push({
+        type: 'text',
+        text: `[Rejected file with disallowed type: ${att.fileName} (${att.mimeType})]`,
+      });
+      continue;
+    }
+
     const { data, error } = await supabase.storage
       .from('chat-attachments')
       .download(att.storagePath);
@@ -55,17 +69,25 @@ export async function buildContentBlocks(
       att.mimeType ===
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     ) {
-      const buffer = Buffer.from(await data.arrayBuffer());
-      const workbook = read(buffer);
-      const csvParts: string[] = [];
-      for (const sheetName of workbook.SheetNames) {
-        const csv = utils.sheet_to_csv(workbook.Sheets[sheetName]);
-        csvParts.push(`--- Sheet: ${sheetName} ---\n${csv}`);
+      try {
+        const buffer = Buffer.from(await data.arrayBuffer());
+        const workbook = read(buffer);
+        const csvParts: string[] = [];
+        for (const sheetName of workbook.SheetNames) {
+          const csv = utils.sheet_to_csv(workbook.Sheets[sheetName]);
+          csvParts.push(`--- Sheet: ${sheetName} ---\n${csv}`);
+        }
+        blocks.push({
+          type: 'text',
+          text: `${att.fileName}:\n${csvParts.join('\n\n')}`,
+        });
+      } catch (err) {
+        console.error(`[FileProcessing] Failed to parse XLSX ${att.fileName}:`, err);
+        blocks.push({
+          type: 'text',
+          text: `[Failed to parse spreadsheet: ${att.fileName}]`,
+        });
       }
-      blocks.push({
-        type: 'text',
-        text: `${att.fileName}:\n${csvParts.join('\n\n')}`,
-      });
     } else if (TEXT_TYPES.includes(att.mimeType)) {
       const text = await data.text();
       blocks.push({

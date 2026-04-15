@@ -71,6 +71,10 @@ sessions.post('/:id/messages', async (c) => {
     return c.json({ error: 'text or attachments required' }, 400);
   }
 
+  if (attachments && attachments.length > 5) {
+    return c.json({ error: 'Maximum 5 files per message' }, 400);
+  }
+
   console.log(
     `[Message] Sending to ${sessionId}: "${(text || '').slice(0, 60)}..." ` +
       `(${attachments?.length ?? 0} files)`,
@@ -86,6 +90,16 @@ sessions.post('/:id/messages', async (c) => {
     .single();
 
   if (!row) return c.json({ error: 'Session not found' }, 404);
+
+  // Validate attachment paths and types
+  if (attachments?.length) {
+    const allowedPrefix = `${userId}/${sessionId}/`;
+    for (const att of attachments) {
+      if (!att.storagePath.startsWith(allowedPrefix)) {
+        return c.json({ error: 'Invalid file path' }, 403);
+      }
+    }
+  }
 
   // Build content blocks
   const content: ContentBlock[] = [];

@@ -401,6 +401,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
             toast.error(
               err instanceof Error ? err.message : 'File upload failed',
             );
+            setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
             return;
           }
         }
@@ -429,6 +430,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
           toast.error(
             err instanceof Error ? err.message : 'File upload failed',
           );
+          setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
           return;
         }
       }
