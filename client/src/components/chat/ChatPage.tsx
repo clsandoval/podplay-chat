@@ -41,12 +41,15 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   const chatInputRef = useRef<ChatInputHandle>(null);
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
+  const pendingSendRef = useRef(0);
+  const historyEventIdsRef = useRef<Set<string> | null>(null);
 
   // Reset state when switching between sessions (same route, different params)
   useEffect(() => {
     setMessages([]);
     setSessionStatus(null);
     currentAgentMessageRef.current = null;
+    historyEventIdsRef.current = null;
     setSessionId(initialSessionId ?? null);
   }, [initialSessionId]);
 
@@ -63,10 +66,21 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   // logic. Pattern: set the ref BEFORE calling setMessages.
   const handleEvent = useCallback(
     (event: AgentEvent) => {
+      // Skip SSE replays of events already loaded from history
+      if (event.id && historyEventIdsRef.current?.has(event.id)) return;
+
       switch (event.type) {
         // Handle user.message echo from SSE (needed after route remount
         // for fresh sessions where we skip history loading)
         case 'user.message': {
+          // Skip echoes for messages we just sent — the optimistic message
+          // already covers them. The counter resets on component remount, so
+          // fresh-session echoes (where state was lost) still come through.
+          if (pendingSendRef.current > 0) {
+            pendingSendRef.current--;
+            break;
+          }
+
           const text =
             event.content
               ?.filter((c: any) => c.type === 'text')
@@ -76,7 +90,6 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
 
           const eventId = event.id ?? nextId();
           setMessages((prev) => {
-            // Don't add duplicate user messages
             if (prev.some((m) => m.role === 'user' && m.content === text)) {
               return prev;
             }
@@ -235,17 +248,27 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   useEffect(() => {
     if (!initialSessionId) return;
 
-    connectTo(initialSessionId);
-
     if (fresh) {
       // Fresh session: SSE stream will deliver user.message echo + agent response
+      connectTo(initialSessionId);
       return;
     }
 
+    // Load history FIRST, then connect SSE. This avoids a race condition where
+    // SSE replays historical events (without attachment data) before getHistory
+    // resolves, causing the attachment-enriched restored messages to be discarded.
     getHistory(initialSessionId)
-      .then((history) => {
+      .then(({ events: history, attachments: historyAttachments }) => {
         const restored: Message[] = [];
         let currentAgent: Message | null = null;
+        const attQueue = [...historyAttachments];
+
+        // Track known event IDs so SSE handler skips replayed events
+        const knownIds = new Set<string>();
+        for (const event of history) {
+          if (event.id) knownIds.add(event.id);
+        }
+        historyEventIdsRef.current = knownIds;
 
         for (const event of history) {
           if (event.type === 'user.message') {
@@ -253,15 +276,47 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
               restored.push(currentAgent);
               currentAgent = null;
             }
-            const text =
-              event.content
-                ?.filter((c: any) => c.type === 'text')
-                .map((c: any) => c.text)
-                .join('') ?? '';
+
+            const textParts: string[] = [];
+            const msgAttachments: MessageAttachment[] = [];
+
+            for (const block of event.content ?? []) {
+              if (block.type === 'image' || block.type === 'document') {
+                // Image/document block → consume next attachment from queue
+                if (attQueue.length > 0) {
+                  const att = attQueue.shift()!;
+                  msgAttachments.push({
+                    fileName: att.fileName,
+                    mimeType: att.mimeType,
+                    url: att.url,
+                    size: att.size,
+                  });
+                }
+              } else if (block.type === 'text') {
+                // Check if this text block is server-injected file content
+                if (
+                  attQueue.length > 0 &&
+                  block.text.startsWith(attQueue[0].fileName + ':\n')
+                ) {
+                  const att = attQueue.shift()!;
+                  msgAttachments.push({
+                    fileName: att.fileName,
+                    mimeType: att.mimeType,
+                    url: att.url,
+                    size: att.size,
+                  });
+                } else {
+                  textParts.push(block.text);
+                }
+              }
+            }
+
             restored.push({
               id: event.id ?? nextId(),
               role: 'user',
-              content: text,
+              content: textParts.join(''),
+              attachments:
+                msgAttachments.length > 0 ? msgAttachments : undefined,
             });
           } else if (event.type === 'agent.message') {
             if (!currentAgent) {
@@ -309,16 +364,17 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         if (currentAgent) {
           restored.push(currentAgent);
         }
-        // Merge: if SSE already delivered an agent message, keep SSE state
-        setMessages((prev) => {
-          const hasAgent = prev.some((m) => m.role === 'agent');
-          if (hasAgent) return prev;
-          return restored;
-        });
+        setMessages(restored);
         setSessionStatus('idle');
+
+        // Connect SSE AFTER history is loaded. Replayed events will be
+        // filtered by historyEventIdsRef in handleEvent.
+        connectTo(initialSessionId);
       })
       .catch(() => {
         toast.error('Failed to load conversation history.');
+        // Still connect SSE as fallback
+        connectTo(initialSessionId);
       });
   }, [initialSessionId, connectTo, fresh]);
 
@@ -380,6 +436,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
       attachments: localAttachments.length > 0 ? localAttachments : undefined,
     };
     setMessages((prev) => [...prev, userMsg]);
+    pendingSendRef.current++;
     currentAgentMessageRef.current = null;
 
     let sid = sessionId;

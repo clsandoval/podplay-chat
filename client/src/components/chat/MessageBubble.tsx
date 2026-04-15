@@ -1,15 +1,21 @@
+import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Download } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download } from 'lucide-react';
 import { ToolUseSummary } from './ToolUseBlock';
 import { FileAttachmentDisplay } from './FileAttachmentDisplay';
 import { cn } from '@/lib/utils';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
+const PREVIEWABLE_EXTENSIONS = new Set([
+  'yaml', 'yml', 'md', 'json', 'csv', 'txt', 'toml',
+]);
+
 interface DetectedFile {
   path: string;
   name: string;
+  content?: string;
 }
 
 function detectFilesInToolResults(toolUses?: ToolUse[]): DetectedFile[] {
@@ -24,6 +30,7 @@ function detectFilesInToolResults(toolUses?: ToolUse[]): DetectedFile[] {
             files.push({
               path: f.path,
               name: f.path.split('/').pop() || f.path,
+              content: f.content,
             });
           }
         }
@@ -32,12 +39,52 @@ function detectFilesInToolResults(toolUses?: ToolUse[]): DetectedFile[] {
         files.push({
           path: tool.input.path,
           name: tool.input.path.split('/').pop() || tool.input.path,
+          content: tool.input.content,
         });
       }
     }
   }
 
   return files;
+}
+
+function AgentFilePreview({ file }: { file: DetectedFile }) {
+  const [expanded, setExpanded] = useState(false);
+  const ext = file.name.split('.').pop()?.toLowerCase() || '';
+  const canPreview = file.content && PREVIEWABLE_EXTENSIONS.has(ext);
+
+  return (
+    <div className="rounded-md border overflow-hidden text-xs">
+      <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-muted/50 border-b">
+        {canPreview && (
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            {expanded ? (
+              <ChevronDown className="h-3 w-3" />
+            ) : (
+              <ChevronRight className="h-3 w-3" />
+            )}
+          </button>
+        )}
+        <span className="font-medium truncate flex-1">{file.name}</span>
+        <a
+          href={`${API_URL}/api/github/${file.path}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <Download className="h-3 w-3" />
+        </a>
+      </div>
+      {canPreview && expanded && (
+        <pre className="p-3 overflow-x-auto max-h-[200px] bg-background text-xs leading-relaxed">
+          <code>{file.content}</code>
+        </pre>
+      )}
+    </div>
+  );
 }
 
 export interface ToolUse {
@@ -135,23 +182,14 @@ export function MessageBubble({ message, userInitials }: MessageBubbleProps) {
           )}
         </div>
 
-        {/* Agent file download links */}
+        {/* Agent file previews / download links */}
         {!isUser && (() => {
           const detectedFiles = detectFilesInToolResults(message.toolUses);
           if (detectedFiles.length === 0) return null;
           return (
-            <div className="flex flex-wrap gap-1.5 mt-2">
+            <div className="flex flex-col gap-1.5 mt-2 max-w-[500px]">
               {detectedFiles.map((f) => (
-                <a
-                  key={f.path}
-                  href={`${API_URL}/api/github/${f.path}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                >
-                  <Download className="h-3 w-3" />
-                  <span className="truncate max-w-[160px]">{f.name}</span>
-                </a>
+                <AgentFilePreview key={f.path} file={f} />
               ))}
             </div>
           );

@@ -44,7 +44,17 @@ export async function sendMessage(
   if (!res.ok) throw new Error(`Failed to send message: ${res.status}`);
 }
 
-export async function getHistory(sessionId: string): Promise<any[]> {
+export interface HistoryAttachment {
+  fileName: string;
+  mimeType: string;
+  storagePath: string;
+  size: number;
+  url: string;
+}
+
+export async function getHistory(
+  sessionId: string,
+): Promise<{ events: any[]; attachments: HistoryAttachment[] }> {
   const res = await authFetch(`/api/sessions/${sessionId}/history`);
   if (!res.ok) throw new Error(`Failed to get history: ${res.status}`);
   return res.json();

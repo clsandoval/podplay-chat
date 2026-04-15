@@ -138,6 +138,9 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(
               variant="ghost"
               size="icon"
               onClick={() => fileInputRef.current?.click()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') e.preventDefault();
+              }}
               disabled={disabled}
               className="shrink-0"
               aria-label="Attach files"

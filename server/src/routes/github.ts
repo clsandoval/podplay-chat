@@ -8,6 +8,14 @@ const cache = new Map<string, { data: any; expiresAt: number }>();
 
 const github = new Hono<AuthEnv>();
 
+const MIME_TYPES: Record<string, string> = {
+  yaml: 'text/yaml', yml: 'text/yaml',
+  md: 'text/markdown', json: 'application/json',
+  csv: 'text/csv', txt: 'text/plain',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+  gif: 'image/gif', webp: 'image/webp', pdf: 'application/pdf',
+};
+
 github.get('/:path{.+}', async (c) => {
   const path = c.req.param('path');
   const cacheKey = path;
@@ -15,7 +23,10 @@ github.get('/:path{.+}', async (c) => {
   // Check cache
   const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
-    return c.json(cached.data);
+    const fileName = path.split('/').pop() || 'download';
+    c.header('Content-Type', cached.data.contentType);
+    c.header('Content-Disposition', `attachment; filename="${fileName}"`);
+    return c.body(cached.data.buffer);
   }
 
   // Fetch from GitHub
@@ -34,10 +45,24 @@ github.get('/:path{.+}', async (c) => {
     return c.json({ error: `GitHub API error: ${res.status}` }, res.status as any);
   }
 
-  const data = await res.json();
+  const data: any = await res.json();
 
-  // Cache the response
-  cache.set(cacheKey, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+  // Decode base64 content and serve as downloadable file
+  if (data.content && data.encoding === 'base64') {
+    const buffer = Buffer.from(data.content.replace(/\n/g, ''), 'base64');
+    const ext = path.split('.').pop()?.toLowerCase() || '';
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+    const fileName = path.split('/').pop() || 'download';
+
+    cache.set(cacheKey, {
+      data: { buffer, contentType },
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+
+    c.header('Content-Type', contentType);
+    c.header('Content-Disposition', `attachment; filename="${fileName}"`);
+    return c.body(buffer);
+  }
 
   return c.json(data);
 });

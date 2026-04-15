@@ -160,7 +160,29 @@ sessions.get('/:id/history', async (c) => {
      'agent.mcp_tool_use', 'agent.mcp_tool_result'].includes(e.type)
   );
 
-  return c.json(relevant);
+  // Fetch attachments with signed URLs for history restoration
+  const { data: attachments } = await supabase
+    .from('chat_attachments')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('created_at');
+
+  const enriched = await Promise.all(
+    (attachments || []).map(async (att: any) => {
+      const { data } = await supabase.storage
+        .from('chat-attachments')
+        .createSignedUrl(att.file_path, 3600);
+      return {
+        fileName: att.file_name,
+        mimeType: att.mime_type,
+        storagePath: att.file_path,
+        size: att.size_bytes,
+        url: data?.signedUrl || '',
+      };
+    }),
+  );
+
+  return c.json({ events: relevant, attachments: enriched });
 });
 
 // Archive a session
