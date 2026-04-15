@@ -10,11 +10,19 @@ export interface ToolUse {
   result?: any;
 }
 
+export interface MessageAttachment {
+  fileName: string;
+  mimeType: string;
+  url: string;
+  size: number;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'agent' | 'system';
   content: string;
   toolUses?: ToolUse[];
+  attachments?: MessageAttachment[];
 }
 
 interface MessageBubbleProps {
