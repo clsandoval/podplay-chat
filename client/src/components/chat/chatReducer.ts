@@ -20,6 +20,7 @@ export type Action =
   | { kind: 'events'; events: AgentEvent[] }
   | { kind: 'restore'; messages: Message[] }
   | { kind: 'user_send'; message: Message }
+  | { kind: 'send_failed'; messageId: string }
   | { kind: 'reset' };
 
 export const initialState: ChatState = {
@@ -54,6 +55,12 @@ export function chatReducer(state: ChatState, action: Action): ChatState {
         messages: [...state.messages, action.message],
         draft: null,
         pendingSends: state.pendingSends + 1,
+      };
+    case 'send_failed':
+      return {
+        ...state,
+        messages: state.messages.filter((m) => m.id !== action.messageId),
+        pendingSends: Math.max(0, state.pendingSends - 1),
       };
     case 'restore':
       return {

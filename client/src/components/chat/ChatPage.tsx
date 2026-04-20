@@ -94,8 +94,11 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
       return;
     }
 
+    let cancelled = false;
+
     getHistory(initialSessionId)
       .then((history: AgentEvent[]) => {
+        if (cancelled) return;
         const ids = history.map((e) => e.id).filter((x): x is string => !!x);
         resetSeenIds();
         seedSeenIds(ids);
@@ -104,9 +107,14 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         connectTo(initialSessionId);
       })
       .catch(() => {
+        if (cancelled) return;
         toast.error('Failed to load conversation history.');
         connectTo(initialSessionId);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [initialSessionId, connectTo, seedSeenIds, resetSeenIds, fresh]);
 
   // Stable handleSend via ref: reads latest sessionId without rebuilding the callback
@@ -137,6 +145,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
           replace: true,
         });
       } catch {
+        dispatch({ kind: 'send_failed', messageId: userMsg.id });
         toast.error("Couldn't start a chat session. Try again.");
       }
       setIsCreatingSession(false);
@@ -146,6 +155,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     try {
       await sendMessage(sid, text);
     } catch {
+      dispatch({ kind: 'send_failed', messageId: userMsg.id });
       toast.error('Failed to send message. Try again.');
     }
   }, [connectTo, resetSeenIds, navigate]);
