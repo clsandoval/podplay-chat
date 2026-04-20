@@ -116,7 +116,9 @@ Critical for `React.memo` to pay off:
 
 ## History restore
 
-The existing event-to-messages mapping in `ChatPage.tsx` (attachment queue that pairs image/document blocks with uploaded attachment records, server-injected text-block detection, agent-turn aggregation) is preserved verbatim — just moved into a helper `eventsToMessages(events, attachments): Message[]` so it can be unit-tested. The component still calls `getHistory()` and passes the result through this helper, then dispatches `{ kind: 'restore', messages }`. All event IDs from history are added to `seenEventIds` before SSE connects, so replay is filtered.
+The existing event-to-messages mapping in `ChatPage.tsx` (agent-turn aggregation: user messages commit, agent.message text accumulates into a current turn, tool_use pushes, tool_result attaches to last tool) is preserved — just extracted into a helper `eventsToMessages(events: AgentEvent[]): Message[]` so it can be unit-tested. The component still calls `getHistory()`, passes the result through this helper, then dispatches `{ kind: 'restore', messages }`.
+
+The current code's history/SSE overlap dedupe is coarse: `if (prev.some(m => m.role === 'agent')) return prev; else return restored`. Replace with event-ID-based dedupe via `seenEventIds: Set<string>` in a ref — history events populate the set before SSE connects, and the rAF flush filters SSE events whose IDs are in the set. File upload (which adds attachments to messages) lives on `feat/file-upload` and is not merged; this plan targets master as-is.
 
 ## Event batching
 
@@ -180,6 +182,8 @@ Equality gotchas:
 
 ## Testing
 
+**Test framework setup.** The client currently has no test framework. Add Vitest + `@testing-library/react` + jsdom as the first plan task. Reducer tests only need Vitest (no DOM), so the setup minimum is a `vitest.config.ts` + `test` script.
+
 **Reducer unit tests** (new, `client/src/components/chat/chatReducer.test.ts`). Pure function, easy to cover:
 
 - `events` action with a single `agent.message` starts a draft.
@@ -205,7 +209,7 @@ Equality gotchas:
 
 ## Preserved as-is
 
-- **`handoffState` module-level variable** (`ChatPage.tsx:30-34`) — bridges the `/` → `/chat/$sessionId` navigation so the new route mount restores messages instead of flashing empty. Orthogonal to the jank fix. Update the handoff shape to include `draft` and `pendingSends` alongside `messages`, otherwise untouched.
+- **Fresh-session navigation flow** in `handleSend`: create session → connect SSE → sendMessage → navigate to `/chat/$sessionId?fresh=true`. The new mount skips history and relies on SSE for echo + response. Behavior is unchanged; only the internal state plumbing changes.
 - Existing SSE reconnection logic in `server/src/lib/session-manager.ts`.
 - `useEventStream`'s connection-lifecycle / gen-guard logic. Only the message handler changes (adds rAF batching).
 
