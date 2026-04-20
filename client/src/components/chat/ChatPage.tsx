@@ -36,6 +36,33 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   // sessionId uses useReducer purely to make the "replace" semantics explicit.
   // A useState setter would work identically here.
 
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isPinnedRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const nearBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      isPinnedRef.current = nearBottom;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Scroll to bottom (rAF-coalesced) whenever content changes if pinned
+  useEffect(() => {
+    if (!isPinnedRef.current) return;
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const el = scrollContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }, [state.messages, state.draft]);
+
   const [isCreatingSession, setIsCreatingSession] = useState(false);
 
   // Stable batched-events handler
@@ -81,6 +108,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   sessionIdRef.current = sessionId;
 
   const handleSend = useCallback(async (text: string) => {
+    isPinnedRef.current = true;
     const userMsg: Message = { id: nextUserId(), role: 'user', content: text };
     dispatch({ kind: 'user_send', message: userMsg });
 
@@ -130,7 +158,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto py-6 space-y-6">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto py-6 space-y-6">
         {state.messages.length === 0 && !state.draft && !isCreatingSession && (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             <p>Start a conversation with PodPlay.</p>
