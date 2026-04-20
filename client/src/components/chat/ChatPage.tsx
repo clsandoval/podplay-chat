@@ -33,22 +33,24 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     (_: string | null, next: string | null) => next,
     initialSessionId ?? null,
   );
-  // Using useReducer for sessionId gives us a stable dispatcher — avoids a useState setter in deps.
+  // sessionId uses useReducer purely to make the "replace" semantics explicit.
+  // A useState setter would work identically here.
 
   const [isCreatingSession, setIsCreatingSession] = useState(false);
-
-  // Reset state when switching sessions
-  useEffect(() => {
-    dispatch({ kind: 'reset' });
-    setSessionId(initialSessionId ?? null);
-  }, [initialSessionId]);
 
   // Stable batched-events handler
   const handleEvents = useCallback((events: AgentEvent[]) => {
     dispatch({ kind: 'events', events });
   }, []);
 
-  const { connectionStatus, connectTo, seedSeenIds } = useEventStream(handleEvents);
+  const { connectionStatus, connectTo, seedSeenIds, resetSeenIds } = useEventStream(handleEvents);
+
+  // Reset state when switching sessions
+  useEffect(() => {
+    dispatch({ kind: 'reset' });
+    resetSeenIds();
+    setSessionId(initialSessionId ?? null);
+  }, [initialSessionId, resetSeenIds]);
 
   // Load history + connect SSE when resuming a session
   useEffect(() => {
@@ -62,6 +64,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     getHistory(initialSessionId)
       .then((history: AgentEvent[]) => {
         const ids = history.map((e) => e.id).filter((x): x is string => !!x);
+        resetSeenIds();
         seedSeenIds(ids);
         const restored = eventsToMessages(history);
         dispatch({ kind: 'restore', messages: restored });
@@ -71,11 +74,9 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         toast.error('Failed to load conversation history.');
         connectTo(initialSessionId);
       });
-  }, [initialSessionId, connectTo, seedSeenIds, fresh]);
+  }, [initialSessionId, connectTo, seedSeenIds, resetSeenIds, fresh]);
 
-  // Stable handleSend via refs: reads latest state without rebuilding the callback
-  const stateRef = useRef(state);
-  stateRef.current = state;
+  // Stable handleSend via ref: reads latest sessionId without rebuilding the callback
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
@@ -91,6 +92,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         sid = newId;
         setSessionId(newId);
 
+        resetSeenIds();
         await connectTo(newId);
         await sendMessage(newId, text);
 
@@ -112,7 +114,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     } catch {
       toast.error('Failed to send message. Try again.');
     }
-  }, [connectTo, navigate]);
+  }, [connectTo, resetSeenIds, navigate]);
 
   const inputDisabled =
     state.sessionStatus === 'running' ||
@@ -136,8 +138,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         )}
         <MessageList messages={state.messages} userInitials={userInitials} />
         {state.draft && <StreamingBubble draft={state.draft} />}
-        {state.sessionStatus === 'running' && !state.draft && <TypingIndicator />}
-        {isCreatingSession && !state.draft && <TypingIndicator />}
+        {(state.sessionStatus === 'running' || isCreatingSession) && !state.draft && <TypingIndicator />}
         {state.sessionStatus === 'terminated' && (
           <div className="max-w-[800px] mx-auto px-4">
             <div className="rounded-md border bg-muted px-3 py-2 text-sm text-muted-foreground text-center">

@@ -69,10 +69,12 @@ export function useEventStream(
     setConnectionStatus('disconnected');
   }, [cancelPending]);
 
+  const resetSeenIds = useCallback(() => {
+    seenIdsRef.current = new Set();
+  }, []);
+
   const connectTo = useCallback(async (sid: string): Promise<void> => {
     close();
-    // close() bumped the gen; reset seen set for the new session.
-    seenIdsRef.current = new Set();
 
     const gen = connectGenRef.current;
     setConnectionStatus('connecting');
@@ -143,5 +145,6 @@ export function useEventStream(
     connectTo,
     close,
     seedSeenIds,
+    resetSeenIds,
   };
 }
