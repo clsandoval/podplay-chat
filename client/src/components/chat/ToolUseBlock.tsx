@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { ChevronRight, Wrench } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -14,7 +14,7 @@ interface ToolUseSummaryProps {
 }
 
 /** Renders all tool calls as a single collapsible summary line. */
-export function ToolUseSummary({ tools }: ToolUseSummaryProps) {
+function ToolUseSummaryImpl({ tools }: ToolUseSummaryProps) {
   const [open, setOpen] = useState(false);
 
   if (tools.length === 0) return null;
@@ -92,3 +92,5 @@ function ToolDetail({ tool }: { tool: ToolUse }) {
     </div>
   );
 }
+
+export const ToolUseSummary = memo(ToolUseSummaryImpl);

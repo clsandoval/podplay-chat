@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ToolUseSummary } from './ToolUseBlock';
@@ -22,7 +23,7 @@ interface MessageBubbleProps {
   userInitials: string;
 }
 
-export function MessageBubble({ message, userInitials }: MessageBubbleProps) {
+function MessageBubbleImpl({ message, userInitials }: MessageBubbleProps) {
   if (message.role === 'system') {
     return (
       <div className="max-w-[800px] mx-auto px-4">
@@ -88,3 +89,5 @@ export function MessageBubble({ message, userInitials }: MessageBubbleProps) {
     </div>
   );
 }
+
+export const MessageBubble = memo(MessageBubbleImpl);
