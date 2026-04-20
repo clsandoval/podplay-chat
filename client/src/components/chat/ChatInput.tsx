@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { memo, useState, useRef, useCallback } from 'react';
 import { Send } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
@@ -8,7 +8,7 @@ interface ChatInputProps {
   placeholder?: string;
 }
 
-export function ChatInput({
+function ChatInputImpl({
   onSend,
   disabled = false,
   placeholder = 'Ask PodPlay anything...',
@@ -70,3 +70,5 @@ export function ChatInput({
     </div>
   );
 }
+
+export const ChatInput = memo(ChatInputImpl);

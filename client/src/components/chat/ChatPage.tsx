@@ -1,25 +1,26 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useReducer, useCallback, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { toast } from 'sonner';
 import { WifiOff } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { createSession, sendMessage, getHistory } from '@/lib/api';
 import { useEventStream, type AgentEvent } from '@/hooks/useEventStream';
-import { MessageBubble, type Message, type ToolUse } from './MessageBubble';
+import { type Message } from './MessageBubble';
 import { ChatInput } from './ChatInput';
 import { TypingIndicator } from './TypingIndicator';
-
-type SessionStatus = 'idle' | 'running' | 'terminated' | null;
+import { MessageList } from './MessageList';
+import { StreamingBubble } from './StreamingBubble';
+import { chatReducer, initialState } from './chatReducer';
+import { eventsToMessages } from './eventsToMessages';
 
 interface ChatPageProps {
   sessionId?: string;
-  /** True when this session was just created — skip history loading, rely on SSE */
   fresh?: boolean;
 }
 
-let messageCounter = 0;
-function nextId() {
-  return `msg-${++messageCounter}-${Date.now()}`;
+let userMsgCounter = 0;
+function nextUserId() {
+  return `u-${++userMsgCounter}-${Date.now()}`;
 }
 
 export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) {
@@ -27,302 +28,105 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   const navigate = useNavigate();
   const userInitials = user?.email ? user.email.slice(0, 2).toUpperCase() : 'U';
 
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(
+  const [state, dispatch] = useReducer(chatReducer, initialState);
+  const [sessionId, setSessionId] = useReducer(
+    (_: string | null, next: string | null) => next,
     initialSessionId ?? null,
   );
-  const [sessionStatus, setSessionStatus] = useState<SessionStatus>(null);
+  // sessionId uses useReducer purely to make the "replace" semantics explicit.
+  // A useState setter would work identically here.
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isPinnedRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const nearBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      isPinnedRef.current = nearBottom;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Scroll to bottom (rAF-coalesced) whenever content changes if pinned
+  useEffect(() => {
+    if (!isPinnedRef.current) return;
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const el = scrollContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+  }, [state.messages, state.draft]);
+
   const [isCreatingSession, setIsCreatingSession] = useState(false);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const currentAgentMessageRef = useRef<string | null>(null);
+  // Stable batched-events handler
+  const handleEvents = useCallback((events: AgentEvent[]) => {
+    dispatch({ kind: 'events', events });
+  }, []);
 
-  // Reset state when switching between sessions (same route, different params)
+  const { connectionStatus, connectTo, seedSeenIds, resetSeenIds } = useEventStream(handleEvents);
+
+  // Reset state when switching sessions
   useEffect(() => {
-    setMessages([]);
-    setSessionStatus(null);
-    currentAgentMessageRef.current = null;
+    dispatch({ kind: 'reset' });
+    resetSeenIds();
     setSessionId(initialSessionId ?? null);
-  }, [initialSessionId]);
+  }, [initialSessionId, resetSeenIds]);
 
-  // Scroll to bottom when messages change
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, sessionStatus]);
-
-  // Handle SSE events
-  //
-  // IMPORTANT: Never mutate currentAgentMessageRef inside a setMessages
-  // updater function. React StrictMode double-invokes updaters, and ref
-  // mutations from the first invocation corrupt the second invocation's
-  // logic. Pattern: set the ref BEFORE calling setMessages.
-  const handleEvent = useCallback(
-    (event: AgentEvent) => {
-      switch (event.type) {
-        // Handle user.message echo from SSE (needed after route remount
-        // for fresh sessions where we skip history loading)
-        case 'user.message': {
-          const text =
-            event.content
-              ?.filter((c: any) => c.type === 'text')
-              .map((c: any) => c.text)
-              .join('') ?? '';
-          if (!text) break;
-
-          const eventId = event.id ?? nextId();
-          setMessages((prev) => {
-            // Don't add duplicate user messages
-            if (prev.some((m) => m.role === 'user' && m.content === text)) {
-              return prev;
-            }
-            return [...prev, { id: eventId, role: 'user' as const, content: text }];
-          });
-          break;
-        }
-
-        case 'agent.message': {
-          const text =
-            event.content
-              ?.filter((c: any) => c.type === 'text')
-              .map((c: any) => c.text)
-              .join('') ?? '';
-
-          let agentId = currentAgentMessageRef.current;
-          if (!agentId) {
-            agentId = nextId();
-            currentAgentMessageRef.current = agentId;
-          }
-          const targetId = agentId;
-
-          setMessages((prev) => {
-            const existing = prev.find((m) => m.id === targetId);
-            if (existing) {
-              return prev.map((m) =>
-                m.id === targetId ? { ...m, content: m.content + text } : m,
-              );
-            }
-            return [
-              ...prev,
-              { id: targetId, role: 'agent' as const, content: text, toolUses: [] },
-            ];
-          });
-          break;
-        }
-
-        case 'agent.tool_use':
-        case 'agent.mcp_tool_use': {
-          const toolUse: ToolUse = {
-            id: event.id ?? nextId(),
-            name: event.name ?? event.tool_name ?? 'unknown',
-            input: event.input,
-          };
-
-          let agentId = currentAgentMessageRef.current;
-          if (!agentId) {
-            agentId = nextId();
-            currentAgentMessageRef.current = agentId;
-          }
-          const targetId = agentId;
-
-          setMessages((prev) => {
-            const existing = prev.find((m) => m.id === targetId);
-            if (existing) {
-              return prev.map((m) =>
-                m.id === targetId
-                  ? { ...m, toolUses: [...(m.toolUses ?? []), toolUse] }
-                  : m,
-              );
-            }
-            return [
-              ...prev,
-              { id: targetId, role: 'agent' as const, content: '', toolUses: [toolUse] },
-            ];
-          });
-          break;
-        }
-
-        case 'agent.tool_result':
-        case 'agent.mcp_tool_result': {
-          const targetId = currentAgentMessageRef.current;
-          if (!targetId) break;
-
-          setMessages((prev) =>
-            prev.map((m) => {
-              if (m.id !== targetId) return m;
-              const tools = [...(m.toolUses ?? [])];
-              if (tools.length > 0) {
-                tools[tools.length - 1] = {
-                  ...tools[tools.length - 1],
-                  result: event.content,
-                };
-              }
-              return { ...m, toolUses: tools };
-            }),
-          );
-          break;
-        }
-
-        case 'session.status_running':
-          setSessionStatus('running');
-          break;
-
-        case 'session.status_idle': {
-          const stopReason = event.stop_reason?.type;
-          if (stopReason === 'end_turn') {
-            setSessionStatus('idle');
-            currentAgentMessageRef.current = null;
-          } else if (stopReason === 'requires_action') {
-            setSessionStatus('idle');
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: nextId(),
-                role: 'system',
-                content: 'The agent requires additional action to continue.',
-              },
-            ]);
-          } else if (stopReason === 'retries_exhausted') {
-            setSessionStatus('idle');
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: nextId(),
-                role: 'system',
-                content: 'The agent encountered repeated errors and stopped.',
-              },
-            ]);
-          } else {
-            setSessionStatus('idle');
-            currentAgentMessageRef.current = null;
-          }
-          break;
-        }
-
-        case 'session.status_terminated':
-          setSessionStatus('terminated');
-          currentAgentMessageRef.current = null;
-          break;
-
-        case 'session.error':
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: nextId(),
-              role: 'system',
-              content: `Something went wrong: ${event.error ?? 'Unknown error'}`,
-            },
-          ]);
-          break;
-
-        default:
-          break;
-      }
-    },
-    [],
-  );
-
-  // SSE hook — must be called before effects that use connectTo
-  const { connectionStatus, connectTo } = useEventStream(handleEvent);
-
-  // Load history + connect SSE when resuming a session.
-  // For fresh sessions (just created), skip history — SSE delivers everything
-  // including the user.message echo.
+  // Load history + connect SSE when resuming a session
   useEffect(() => {
     if (!initialSessionId) return;
 
-    connectTo(initialSessionId);
-
     if (fresh) {
-      // Fresh session: SSE stream will deliver user.message echo + agent response
+      connectTo(initialSessionId);
       return;
     }
 
-    getHistory(initialSessionId)
-      .then((history) => {
-        const restored: Message[] = [];
-        let currentAgent: Message | null = null;
+    let cancelled = false;
 
-        for (const event of history) {
-          if (event.type === 'user.message') {
-            if (currentAgent) {
-              restored.push(currentAgent);
-              currentAgent = null;
-            }
-            const text =
-              event.content
-                ?.filter((c: any) => c.type === 'text')
-                .map((c: any) => c.text)
-                .join('') ?? '';
-            restored.push({
-              id: event.id ?? nextId(),
-              role: 'user',
-              content: text,
-            });
-          } else if (event.type === 'agent.message') {
-            if (!currentAgent) {
-              currentAgent = {
-                id: event.id ?? nextId(),
-                role: 'agent',
-                content: '',
-                toolUses: [],
-              };
-            }
-            const text =
-              event.content
-                ?.filter((c: any) => c.type === 'text')
-                .map((c: any) => c.text)
-                .join('') ?? '';
-            currentAgent.content += text;
-          } else if (
-            event.type === 'agent.tool_use' ||
-            event.type === 'agent.mcp_tool_use'
-          ) {
-            if (!currentAgent) {
-              currentAgent = {
-                id: nextId(),
-                role: 'agent',
-                content: '',
-                toolUses: [],
-              };
-            }
-            currentAgent.toolUses!.push({
-              id: event.id ?? nextId(),
-              name: event.name ?? event.tool_name ?? 'unknown',
-              input: event.input,
-            });
-          } else if (
-            event.type === 'agent.tool_result' ||
-            event.type === 'agent.mcp_tool_result'
-          ) {
-            if (currentAgent && currentAgent.toolUses!.length > 0) {
-              const lastTool =
-                currentAgent.toolUses![currentAgent.toolUses!.length - 1];
-              lastTool.result = event.content;
-            }
-          }
-        }
-        if (currentAgent) {
-          restored.push(currentAgent);
-        }
-        // Merge: if SSE already delivered an agent message, keep SSE state
-        setMessages((prev) => {
-          const hasAgent = prev.some((m) => m.role === 'agent');
-          if (hasAgent) return prev;
-          return restored;
-        });
-        setSessionStatus('idle');
+    getHistory(initialSessionId)
+      .then((history: AgentEvent[]) => {
+        if (cancelled) return;
+        const ids = history.map((e) => e.id).filter((x): x is string => !!x);
+        resetSeenIds();
+        seedSeenIds(ids);
+        const restored = eventsToMessages(history);
+        dispatch({ kind: 'restore', messages: restored });
+        connectTo(initialSessionId);
       })
       .catch(() => {
+        if (cancelled) return;
         toast.error('Failed to load conversation history.');
+        connectTo(initialSessionId);
       });
-  }, [initialSessionId, connectTo, fresh]);
 
-  async function handleSend(text: string) {
-    const userMsg: Message = { id: nextId(), role: 'user', content: text };
-    setMessages((prev) => [...prev, userMsg]);
-    currentAgentMessageRef.current = null;
+    return () => {
+      cancelled = true;
+    };
+  }, [initialSessionId, connectTo, seedSeenIds, resetSeenIds, fresh]);
 
-    let sid = sessionId;
+  // Stable handleSend via ref: reads latest sessionId without rebuilding the callback
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+
+  const handleSend = useCallback(async (text: string) => {
+    isPinnedRef.current = true;
+    const userMsg: Message = { id: nextUserId(), role: 'user', content: text };
+    dispatch({ kind: 'user_send', message: userMsg });
+
+    let sid = sessionIdRef.current;
     if (!sid) {
       setIsCreatingSession(true);
       try {
@@ -330,12 +134,10 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         sid = newId;
         setSessionId(newId);
 
+        resetSeenIds();
         await connectTo(newId);
         await sendMessage(newId, text);
 
-        // Navigate AFTER message is sent. The new component will mount
-        // with fresh=true, skip history loading, and get events via SSE
-        // (including the user.message echo and agent response).
         void navigate({
           to: '/chat/$sessionId',
           params: { sessionId: newId },
@@ -343,6 +145,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
           replace: true,
         });
       } catch {
+        dispatch({ kind: 'send_failed', messageId: userMsg.id });
         toast.error("Couldn't start a chat session. Try again.");
       }
       setIsCreatingSession(false);
@@ -352,13 +155,14 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     try {
       await sendMessage(sid, text);
     } catch {
+      dispatch({ kind: 'send_failed', messageId: userMsg.id });
       toast.error('Failed to send message. Try again.');
     }
-  }
+  }, [connectTo, resetSeenIds, navigate]);
 
   const inputDisabled =
-    sessionStatus === 'running' ||
-    sessionStatus === 'terminated' ||
+    state.sessionStatus === 'running' ||
+    state.sessionStatus === 'terminated' ||
     isCreatingSession;
 
   return (
@@ -370,21 +174,16 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto py-6 space-y-6">
-        {messages.length === 0 && !isCreatingSession && (
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto py-6 space-y-6">
+        {state.messages.length === 0 && !state.draft && !isCreatingSession && (
           <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
             <p>Start a conversation with PodPlay.</p>
           </div>
         )}
-        {messages.map((msg) => (
-          <MessageBubble
-            key={msg.id}
-            message={msg}
-            userInitials={userInitials}
-          />
-        ))}
-        {(sessionStatus === 'running' || isCreatingSession) && <TypingIndicator />}
-        {sessionStatus === 'terminated' && (
+        <MessageList messages={state.messages} userInitials={userInitials} />
+        {state.draft && <StreamingBubble draft={state.draft} />}
+        {(state.sessionStatus === 'running' || isCreatingSession) && !state.draft && <TypingIndicator />}
+        {state.sessionStatus === 'terminated' && (
           <div className="max-w-[800px] mx-auto px-4">
             <div className="rounded-md border bg-muted px-3 py-2 text-sm text-muted-foreground text-center">
               Session ended.{' '}
@@ -394,7 +193,6 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
             </div>
           </div>
         )}
-        <div ref={messagesEndRef} />
       </div>
 
       <ChatInput onSend={handleSend} disabled={inputDisabled} />
