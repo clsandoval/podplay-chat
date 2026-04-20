@@ -74,6 +74,21 @@ export function chatReducer(state: ChatState, action: Action): ChatState {
   }
 }
 
+function commitDraft(state: ChatState): ChatState {
+  if (!state.draft) return state;
+  const committed: Message = {
+    id: state.draft.id,
+    role: 'agent',
+    content: state.draft.content,
+    toolUses: state.draft.toolUses,
+  };
+  return {
+    ...state,
+    messages: [...state.messages, committed],
+    draft: null,
+  };
+}
+
 function applyEvent(state: ChatState, event: AgentEvent): ChatState {
   switch (event.type) {
     case 'user.message': {
@@ -125,6 +140,64 @@ function applyEvent(state: ChatState, event: AgentEvent): ChatState {
         draft: { ...state.draft, toolUses: newTools },
       };
     }
+
+    case 'session.status_running':
+      return { ...state, sessionStatus: 'running' };
+
+    case 'session.status_idle': {
+      const stopReason = (event as any).stop_reason?.type;
+      const committed = commitDraft(state);
+      if (stopReason === 'requires_action') {
+        return {
+          ...committed,
+          sessionStatus: 'idle',
+          messages: [
+            ...committed.messages,
+            {
+              id: `sys-${event.id ?? Date.now()}`,
+              role: 'system',
+              content: 'The agent requires additional action to continue.',
+            },
+          ],
+        };
+      }
+      if (stopReason === 'retries_exhausted') {
+        return {
+          ...committed,
+          sessionStatus: 'idle',
+          messages: [
+            ...committed.messages,
+            {
+              id: `sys-${event.id ?? Date.now()}`,
+              role: 'system',
+              content: 'The agent encountered repeated errors and stopped.',
+            },
+          ],
+        };
+      }
+      return { ...committed, sessionStatus: 'idle' };
+    }
+
+    case 'session.status_terminated': {
+      const committed = commitDraft(state);
+      return { ...committed, sessionStatus: 'terminated' };
+    }
+
+    case 'session.error': {
+      const errMsg = (event as any).error?.message ?? JSON.stringify((event as any).error ?? 'Unknown error');
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: `sys-${event.id ?? Date.now()}`,
+            role: 'system',
+            content: `Something went wrong: ${errMsg}`,
+          },
+        ],
+      };
+    }
+
     default:
       return state;
   }

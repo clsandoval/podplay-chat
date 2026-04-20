@@ -202,4 +202,91 @@ describe('chatReducer', () => {
       expect(afterR2.draft!.toolUses[1].result).toBe('ok');
     });
   });
+
+  describe('events: session lifecycle', () => {
+    it('status_running sets sessionStatus', () => {
+      const evt = { type: 'session.status_running', id: 's1' };
+      const next = chatReducer(initialState, { kind: 'events', events: [evt] });
+      expect(next.sessionStatus).toBe('running');
+    });
+
+    it('status_idle end_turn commits draft and idles', () => {
+      const start = {
+        ...initialState,
+        draft: {
+          id: 'draft-1',
+          content: 'hello',
+          toolUses: [{ id: 't1', name: 'x', input: {} }],
+        },
+      };
+      const evt = {
+        type: 'session.status_idle',
+        id: 's1',
+        stop_reason: { type: 'end_turn' },
+      };
+      const next = chatReducer(start, { kind: 'events', events: [evt] });
+      expect(next.draft).toBeNull();
+      expect(next.sessionStatus).toBe('idle');
+      expect(next.messages).toHaveLength(1);
+      expect(next.messages[0].role).toBe('agent');
+      expect(next.messages[0].content).toBe('hello');
+    });
+
+    it('status_idle requires_action commits draft and adds system message', () => {
+      const start = {
+        ...initialState,
+        draft: { id: 'draft-1', content: 'partial', toolUses: [] },
+      };
+      const evt = {
+        type: 'session.status_idle',
+        id: 's1',
+        stop_reason: { type: 'requires_action' },
+      };
+      const next = chatReducer(start, { kind: 'events', events: [evt] });
+      expect(next.draft).toBeNull();
+      expect(next.sessionStatus).toBe('idle');
+      expect(next.messages).toHaveLength(2);
+      expect(next.messages[0].role).toBe('agent');
+      expect(next.messages[1].role).toBe('system');
+    });
+
+    it('status_idle retries_exhausted commits draft and adds system message', () => {
+      const start = {
+        ...initialState,
+        draft: { id: 'draft-1', content: 'partial', toolUses: [] },
+      };
+      const evt = {
+        type: 'session.status_idle',
+        id: 's1',
+        stop_reason: { type: 'retries_exhausted' },
+      };
+      const next = chatReducer(start, { kind: 'events', events: [evt] });
+      expect(next.sessionStatus).toBe('idle');
+      expect(next.messages[1].role).toBe('system');
+      expect(next.messages[1].content).toContain('repeated errors');
+    });
+
+    it('status_terminated commits draft and sets terminated', () => {
+      const start = {
+        ...initialState,
+        draft: { id: 'draft-1', content: 'partial', toolUses: [] },
+      };
+      const evt = { type: 'session.status_terminated', id: 's1' };
+      const next = chatReducer(start, { kind: 'events', events: [evt] });
+      expect(next.draft).toBeNull();
+      expect(next.sessionStatus).toBe('terminated');
+      expect(next.messages).toHaveLength(1);
+    });
+
+    it('session.error pushes system message', () => {
+      const evt = {
+        type: 'session.error',
+        id: 's1',
+        error: { message: 'boom' },
+      };
+      const next = chatReducer(initialState, { kind: 'events', events: [evt] });
+      expect(next.messages).toHaveLength(1);
+      expect(next.messages[0].role).toBe('system');
+    });
+  });
 });
