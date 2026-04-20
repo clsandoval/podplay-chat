@@ -19,6 +19,13 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   });
 }
 
+export interface FileAttachment {
+  fileName: string;
+  mimeType: string;
+  storagePath: string;
+  size: number;
+}
+
 export async function createSession(): Promise<{ sessionId: string }> {
   const res = await authFetch('/api/sessions', { method: 'POST' });
   if (!res.ok) throw new Error(`Failed to create session: ${res.status}`);
@@ -28,15 +35,26 @@ export async function createSession(): Promise<{ sessionId: string }> {
 export async function sendMessage(
   sessionId: string,
   text: string,
+  attachments?: FileAttachment[],
 ): Promise<void> {
   const res = await authFetch(`/api/sessions/${sessionId}/messages`, {
     method: 'POST',
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, attachments }),
   });
   if (!res.ok) throw new Error(`Failed to send message: ${res.status}`);
 }
 
-export async function getHistory(sessionId: string): Promise<any[]> {
+export interface HistoryAttachment {
+  fileName: string;
+  mimeType: string;
+  storagePath: string;
+  size: number;
+  url: string;
+}
+
+export async function getHistory(
+  sessionId: string,
+): Promise<{ events: any[]; attachments: HistoryAttachment[] }> {
   const res = await authFetch(`/api/sessions/${sessionId}/history`);
   if (!res.ok) throw new Error(`Failed to get history: ${res.status}`);
   return res.json();

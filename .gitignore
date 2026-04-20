@@ -2,3 +2,5 @@ node_modules/
 dist/
 .env
 .env.local
+.superpowers/autopilot-config.json
+.superpowers/autopilot-sessions.json

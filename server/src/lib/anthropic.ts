@@ -1,5 +1,10 @@
 const BASE_URL = 'https://api.anthropic.com/v1';
 
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+  | { type: 'document'; source: { type: 'base64'; media_type: string; data: string } };
+
 const headers = () => ({
   'x-api-key': process.env.ANTHROPIC_API_KEY!,
   'anthropic-version': '2023-06-01',
@@ -28,12 +33,12 @@ export async function createSession(agentId: string, agentVersion: number, envir
   return res.json();
 }
 
-export async function sendMessage(sessionId: string, text: string) {
+export async function sendMessage(sessionId: string, content: ContentBlock[]) {
   const res = await fetch(`${BASE_URL}/sessions/${sessionId}/events`, {
     method: 'POST',
     headers: headers(),
     body: JSON.stringify({
-      events: [{ type: 'user.message', content: [{ type: 'text', text }] }],
+      events: [{ type: 'user.message', content }],
     }),
   });
   if (!res.ok) throw new Error(`Send message failed: ${res.status} ${await res.text()}`);

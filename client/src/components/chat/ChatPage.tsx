@@ -4,10 +4,12 @@ import { toast } from 'sonner';
 import { WifiOff } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 import { createSession, sendMessage, getHistory } from '@/lib/api';
+import { uploadFiles, validateFile, type PendingFile } from '@/lib/file-upload';
 import { useEventStream, type AgentEvent } from '@/hooks/useEventStream';
-import { MessageBubble, type Message, type ToolUse } from './MessageBubble';
-import { ChatInput } from './ChatInput';
+import { MessageBubble, type Message, type MessageAttachment, type ToolUse } from './MessageBubble';
+import { ChatInput, type ChatInputHandle } from './ChatInput';
 import { TypingIndicator } from './TypingIndicator';
+import { DropOverlay } from './DropOverlay';
 
 type SessionStatus = 'idle' | 'running' | 'terminated' | null;
 
@@ -21,6 +23,15 @@ let messageCounter = 0;
 function nextId() {
   return `msg-${++messageCounter}-${Date.now()}`;
 }
+
+// Module-level state — survives component remount across route transitions.
+// Stores messages + SSE state when navigating from / → /chat/$sessionId so
+// the new mount can restore them instead of flashing empty.
+let handoffState: {
+  sessionId: string;
+  messages: Message[];
+  seenIds: Set<string>;
+} | null = null;
 
 export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) {
   const { user } = useAuth();
@@ -36,12 +47,28 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const currentAgentMessageRef = useRef<string | null>(null);
+  const chatInputRef = useRef<ChatInputHandle>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
+  const pendingSendRef = useRef(0);
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
 
   // Reset state when switching between sessions (same route, different params)
   useEffect(() => {
+    // Restore from handoff when navigating after session creation
+    if (handoffState && initialSessionId === handoffState.sessionId) {
+      setMessages(handoffState.messages);
+      seenEventIdsRef.current = handoffState.seenIds;
+      setSessionId(initialSessionId);
+      handoffState = null;
+      return;
+    }
+    handoffState = null;
+
     setMessages([]);
     setSessionStatus(null);
     currentAgentMessageRef.current = null;
+    seenEventIdsRef.current = new Set();
     setSessionId(initialSessionId ?? null);
   }, [initialSessionId]);
 
@@ -58,10 +85,24 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   // logic. Pattern: set the ref BEFORE calling setMessages.
   const handleEvent = useCallback(
     (event: AgentEvent) => {
+      // Skip any event we've already processed (history or SSE replay)
+      if (event.id) {
+        if (seenEventIdsRef.current.has(event.id)) return;
+        seenEventIdsRef.current.add(event.id);
+      }
+
       switch (event.type) {
         // Handle user.message echo from SSE (needed after route remount
         // for fresh sessions where we skip history loading)
         case 'user.message': {
+          // Skip echoes for messages we just sent — the optimistic message
+          // already covers them. The counter resets on component remount, so
+          // fresh-session echoes (where state was lost) still come through.
+          if (pendingSendRef.current > 0) {
+            pendingSendRef.current--;
+            break;
+          }
+
           const text =
             event.content
               ?.filter((c: any) => c.type === 'text')
@@ -71,7 +112,6 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
 
           const eventId = event.id ?? nextId();
           setMessages((prev) => {
-            // Don't add duplicate user messages
             if (prev.some((m) => m.role === 'user' && m.content === text)) {
               return prev;
             }
@@ -230,17 +270,26 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   useEffect(() => {
     if (!initialSessionId) return;
 
-    connectTo(initialSessionId);
-
     if (fresh) {
-      // Fresh session: SSE stream will deliver user.message echo + agent response
+      // Fresh session — SSE connection from handleSend didn't survive remount,
+      // but handoff restored messages so reconnecting won't flash.
+      connectTo(initialSessionId);
       return;
     }
 
+    // Load history FIRST, then connect SSE. This avoids a race condition where
+    // SSE replays historical events (without attachment data) before getHistory
+    // resolves, causing the attachment-enriched restored messages to be discarded.
     getHistory(initialSessionId)
-      .then((history) => {
+      .then(({ events: history, attachments: historyAttachments }) => {
         const restored: Message[] = [];
         let currentAgent: Message | null = null;
+        const attQueue = [...historyAttachments];
+
+        // Track known event IDs so SSE handler skips replayed events
+        for (const event of history) {
+          if (event.id) seenEventIdsRef.current.add(event.id);
+        }
 
         for (const event of history) {
           if (event.type === 'user.message') {
@@ -248,15 +297,47 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
               restored.push(currentAgent);
               currentAgent = null;
             }
-            const text =
-              event.content
-                ?.filter((c: any) => c.type === 'text')
-                .map((c: any) => c.text)
-                .join('') ?? '';
+
+            const textParts: string[] = [];
+            const msgAttachments: MessageAttachment[] = [];
+
+            for (const block of event.content ?? []) {
+              if (block.type === 'image' || block.type === 'document') {
+                // Image/document block → consume next attachment from queue
+                if (attQueue.length > 0) {
+                  const att = attQueue.shift()!;
+                  msgAttachments.push({
+                    fileName: att.fileName,
+                    mimeType: att.mimeType,
+                    url: att.url,
+                    size: att.size,
+                  });
+                }
+              } else if (block.type === 'text') {
+                // Check if this text block is server-injected file content
+                if (
+                  attQueue.length > 0 &&
+                  block.text.startsWith(attQueue[0].fileName + ':\n')
+                ) {
+                  const att = attQueue.shift()!;
+                  msgAttachments.push({
+                    fileName: att.fileName,
+                    mimeType: att.mimeType,
+                    url: att.url,
+                    size: att.size,
+                  });
+                } else {
+                  textParts.push(block.text);
+                }
+              }
+            }
+
             restored.push({
               id: event.id ?? nextId(),
               role: 'user',
-              content: text,
+              content: textParts.join(''),
+              attachments:
+                msgAttachments.length > 0 ? msgAttachments : undefined,
             });
           } else if (event.type === 'agent.message') {
             if (!currentAgent) {
@@ -304,22 +385,79 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         if (currentAgent) {
           restored.push(currentAgent);
         }
-        // Merge: if SSE already delivered an agent message, keep SSE state
-        setMessages((prev) => {
-          const hasAgent = prev.some((m) => m.role === 'agent');
-          if (hasAgent) return prev;
-          return restored;
-        });
+        setMessages(restored);
         setSessionStatus('idle');
+
+        // Connect SSE AFTER history is loaded. Replayed events will be
+        // filtered by historyEventIdsRef in handleEvent.
+        connectTo(initialSessionId);
       })
       .catch(() => {
         toast.error('Failed to load conversation history.');
+        // Still connect SSE as fallback
+        connectTo(initialSessionId);
       });
   }, [initialSessionId, connectTo, fresh]);
 
-  async function handleSend(text: string) {
-    const userMsg: Message = { id: nextId(), role: 'user', content: text };
+  // Drag-and-drop handlers
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+
+    const droppedFiles = Array.from(e.dataTransfer.files);
+    const valid: File[] = [];
+    for (const file of droppedFiles) {
+      const error = validateFile(file, valid.length);
+      if (error) {
+        toast.error(error);
+      } else {
+        valid.push(file);
+      }
+    }
+
+    if (valid.length > 0) {
+      chatInputRef.current?.addFiles(valid);
+    }
+  }, []);
+
+  async function handleSend(text: string, pendingFiles: PendingFile[]) {
+    // Build local message with attachment previews
+    const localAttachments: MessageAttachment[] = pendingFiles.map((pf) => ({
+      fileName: pf.file.name,
+      mimeType: pf.file.type,
+      url: pf.previewUrl || '',
+      size: pf.file.size,
+    }));
+
+    const userMsg: Message = {
+      id: nextId(),
+      role: 'user',
+      content: text,
+      attachments: localAttachments.length > 0 ? localAttachments : undefined,
+    };
     setMessages((prev) => [...prev, userMsg]);
+    pendingSendRef.current++;
     currentAgentMessageRef.current = null;
 
     let sid = sessionId;
@@ -331,11 +469,34 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         setSessionId(newId);
 
         await connectTo(newId);
-        await sendMessage(newId, text);
 
-        // Navigate AFTER message is sent. The new component will mount
-        // with fresh=true, skip history loading, and get events via SSE
-        // (including the user.message echo and agent response).
+        // Upload files if any
+        let attachments;
+        if (pendingFiles.length > 0) {
+          try {
+            attachments = await uploadFiles(pendingFiles, user!.id, newId);
+          } catch (err) {
+            toast.error(
+              err instanceof Error ? err.message : 'File upload failed',
+            );
+            setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
+            return;
+          }
+        }
+
+        await sendMessage(newId, text, attachments);
+
+        // Stash current state so the new route mount can restore it
+        // instead of flashing empty → repopulated.
+        handoffState = {
+          sessionId: newId,
+          messages: [...messages, userMsg],
+          seenIds: new Set(seenEventIdsRef.current),
+        };
+
+        // Notify sidebar to refresh session list
+        window.dispatchEvent(new CustomEvent('session-created'));
+
         void navigate({
           to: '/chat/$sessionId',
           params: { sessionId: newId },
@@ -350,7 +511,20 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     }
 
     try {
-      await sendMessage(sid, text);
+      let attachments;
+      if (pendingFiles.length > 0) {
+        try {
+          attachments = await uploadFiles(pendingFiles, user!.id, sid);
+        } catch (err) {
+          toast.error(
+            err instanceof Error ? err.message : 'File upload failed',
+          );
+          setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
+          return;
+        }
+      }
+
+      await sendMessage(sid, text, attachments);
     } catch {
       toast.error('Failed to send message. Try again.');
     }
@@ -362,7 +536,15 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     isCreatingSession;
 
   return (
-    <div className="flex flex-1 flex-col h-full">
+    <div
+      className="flex flex-1 flex-col h-full relative"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {isDragging && <DropOverlay />}
+
       {connectionStatus === 'disconnected' && sessionId && (
         <div className="flex items-center justify-center gap-2 bg-destructive/10 border-b border-destructive/30 px-4 py-2 text-sm text-destructive">
           <WifiOff className="h-4 w-4" />
@@ -397,7 +579,7 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         <div ref={messagesEndRef} />
       </div>
 
-      <ChatInput onSend={handleSend} disabled={inputDisabled} />
+      <ChatInput ref={chatInputRef} onSend={handleSend} disabled={inputDisabled} />
     </div>
   );
 }

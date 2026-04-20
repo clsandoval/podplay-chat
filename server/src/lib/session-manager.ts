@@ -73,6 +73,8 @@ async function openStream(managed: ManagedSession) {
       partial = remaining;
 
       for (const event of events) {
+        console.log(`[SM] ${managed.sessionId.slice(0,12)}.. event: ${event.type} (${managed.subscribers.size} subscribers, ${managed.buffer.length} buffered)`);
+
         // Buffer for replay
         managed.buffer.push(event);
         if (managed.buffer.length > MAX_BUFFER) {

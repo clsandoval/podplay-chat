@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import type { AuthEnv } from '../middleware/auth.js';
 import { supabase } from '../lib/supabase.js';
 import * as anthropic from '../lib/anthropic.js';
+import type { ContentBlock } from '../lib/anthropic.js';
+import { buildContentBlocks, type FileAttachment } from '../lib/file-processing.js';
 
 const sessions = new Hono<AuthEnv>();
 
@@ -22,6 +24,7 @@ sessions.get('/', async (c) => {
 // Create a new session
 sessions.post('/', async (c) => {
   const userId = c.get('userId');
+  console.log(`[Session] Creating session for user ${userId}`);
 
   let session;
   try {
@@ -44,10 +47,12 @@ sessions.post('/', async (c) => {
     status: 'active',
   });
 
-  if (error) return c.json({ error: error.message }, 500);
+  if (error) {
+    console.error(`[Session] Supabase insert error:`, error.message);
+    return c.json({ error: error.message }, 500);
+  }
 
-  // Open durable SSE connection (stream-first per API docs)
-  // SessionManager is defined in Task 10
+  console.log(`[Session] Created ${session.id}, opening SSE stream...`);
   const { sessionManager } = await import('../lib/session-manager.js');
   sessionManager.connect(session.id);
 
@@ -57,9 +62,23 @@ sessions.post('/', async (c) => {
 // Send a message
 sessions.post('/:id/messages', async (c) => {
   const sessionId = c.req.param('id');
-  const { text } = await c.req.json<{ text: string }>();
+  const { text, attachments } = await c.req.json<{
+    text: string;
+    attachments?: FileAttachment[];
+  }>();
 
-  if (!text?.trim()) return c.json({ error: 'text is required' }, 400);
+  if (!text?.trim() && (!attachments || attachments.length === 0)) {
+    return c.json({ error: 'text or attachments required' }, 400);
+  }
+
+  if (attachments && attachments.length > 5) {
+    return c.json({ error: 'Maximum 5 files per message' }, 400);
+  }
+
+  console.log(
+    `[Message] Sending to ${sessionId}: "${(text || '').slice(0, 60)}..." ` +
+      `(${attachments?.length ?? 0} files)`,
+  );
 
   // Verify session belongs to user
   const userId = c.get('userId');
@@ -72,7 +91,43 @@ sessions.post('/:id/messages', async (c) => {
 
   if (!row) return c.json({ error: 'Session not found' }, 404);
 
-  await anthropic.sendMessage(sessionId, text);
+  // Validate attachment paths and types
+  if (attachments?.length) {
+    const allowedPrefix = `${userId}/${sessionId}/`;
+    for (const att of attachments) {
+      if (!att.storagePath.startsWith(allowedPrefix)) {
+        return c.json({ error: 'Invalid file path' }, 403);
+      }
+    }
+  }
+
+  // Build content blocks
+  const content: ContentBlock[] = [];
+  if (text?.trim()) {
+    content.push({ type: 'text', text });
+  }
+  if (attachments?.length) {
+    const fileBlocks = await buildContentBlocks(attachments);
+    content.push(...fileBlocks);
+
+    // Record attachments in the database
+    const rows = attachments.map((att) => ({
+      user_id: userId,
+      session_id: sessionId,
+      file_name: att.fileName,
+      file_path: att.storagePath,
+      mime_type: att.mimeType,
+      size_bytes: att.size,
+    }));
+    const { error: insertError } = await supabase
+      .from('chat_attachments')
+      .insert(rows);
+    if (insertError) {
+      console.error('[Message] Failed to record attachments:', insertError.message);
+    }
+  }
+
+  await anthropic.sendMessage(sessionId, content);
 
   // Update last_message_at
   await supabase
@@ -105,7 +160,29 @@ sessions.get('/:id/history', async (c) => {
      'agent.mcp_tool_use', 'agent.mcp_tool_result'].includes(e.type)
   );
 
-  return c.json(relevant);
+  // Fetch attachments with signed URLs for history restoration
+  const { data: attachments } = await supabase
+    .from('chat_attachments')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('created_at');
+
+  const enriched = await Promise.all(
+    (attachments || []).map(async (att: any) => {
+      const { data } = await supabase.storage
+        .from('chat-attachments')
+        .createSignedUrl(att.file_path, 3600);
+      return {
+        fileName: att.file_name,
+        mimeType: att.mime_type,
+        storagePath: att.file_path,
+        size: att.size_bytes,
+        url: data?.signedUrl || '',
+      };
+    }),
+  );
+
+  return c.json({ events: relevant, attachments: enriched });
 });
 
 // Archive a session
