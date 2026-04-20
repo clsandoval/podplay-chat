@@ -98,6 +98,33 @@ function applyEvent(state: ChatState, event: AgentEvent): ChatState {
         draft: { ...draft, content: draft.content + text },
       };
     }
+    case 'agent.tool_use':
+    case 'agent.mcp_tool_use': {
+      const draft = state.draft ?? newDraft();
+      const toolUse: ToolUse = {
+        id: event.id ?? `tool-${Date.now()}`,
+        name: (event as any).name ?? 'unknown',
+        input: (event as any).input,
+      };
+      return {
+        ...state,
+        draft: { ...draft, toolUses: [...draft.toolUses, toolUse] },
+      };
+    }
+    case 'agent.tool_result':
+    case 'agent.mcp_tool_result': {
+      if (!state.draft || state.draft.toolUses.length === 0) return state;
+      const tools = state.draft.toolUses;
+      const lastIdx = tools.length - 1;
+      const newTools = tools.slice(0, lastIdx).concat({
+        ...tools[lastIdx],
+        result: (event as any).content,
+      });
+      return {
+        ...state,
+        draft: { ...state.draft, toolUses: newTools },
+      };
+    }
     default:
       return state;
   }

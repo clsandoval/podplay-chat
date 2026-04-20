@@ -144,4 +144,62 @@ describe('chatReducer', () => {
       expect(next.messages).toBe(start.messages); // reference-identity preserved
     });
   });
+
+  describe('events: tool_use / tool_result', () => {
+    it('appends tool_use to draft.toolUses', () => {
+      const evt = {
+        type: 'agent.tool_use',
+        id: 't1',
+        name: 'search',
+        input: { query: 'hello' },
+      };
+      const next = chatReducer(initialState, { kind: 'events', events: [evt] });
+      expect(next.draft!.toolUses).toHaveLength(1);
+      expect(next.draft!.toolUses[0]).toEqual({
+        id: 't1',
+        name: 'search',
+        input: { query: 'hello' },
+      });
+    });
+
+    it('handles mcp_tool_use the same as tool_use', () => {
+      const evt = {
+        type: 'agent.mcp_tool_use',
+        id: 't1',
+        name: 'mcp.call',
+        input: {},
+      };
+      const next = chatReducer(initialState, { kind: 'events', events: [evt] });
+      expect(next.draft!.toolUses).toHaveLength(1);
+    });
+
+    it('attaches tool_result to the last tool_use via new array', () => {
+      const toolUse = { type: 'agent.tool_use', id: 't1', name: 'search', input: {} };
+      const toolResult = {
+        type: 'agent.tool_result',
+        id: 'r1',
+        content: [{ type: 'text', text: 'result data' }],
+      };
+      const next = chatReducer(initialState, {
+        kind: 'events',
+        events: [toolUse, toolResult],
+      });
+      expect(next.draft!.toolUses).toHaveLength(1);
+      expect(next.draft!.toolUses[0].result).toEqual([{ type: 'text', text: 'result data' }]);
+    });
+
+    it('tool_result preserves identity of earlier tool entries', () => {
+      const t1 = { type: 'agent.tool_use', id: 't1', name: 'a', input: {} };
+      const t2 = { type: 'agent.tool_use', id: 't2', name: 'b', input: {} };
+      const r2 = { type: 'agent.tool_result', id: 'r2', content: 'ok' };
+      const afterT1T2 = chatReducer(initialState, {
+        kind: 'events',
+        events: [t1, t2],
+      });
+      const firstRef = afterT1T2.draft!.toolUses[0];
+      const afterR2 = chatReducer(afterT1T2, { kind: 'events', events: [r2] });
+      expect(afterR2.draft!.toolUses[0]).toBe(firstRef); // identity preserved
+      expect(afterR2.draft!.toolUses[1].result).toBe('ok');
+    });
+  });
 });
