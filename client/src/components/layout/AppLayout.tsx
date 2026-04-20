@@ -17,19 +17,27 @@ export function AppLayout() {
   >([]);
 
   useEffect(() => {
-    listSessions()
-      .then((data) =>
-        setSessions(
-          data.slice(0, 10).map((s: any) => ({
-            sessionId: s.session_id,
-            title: s.title,
-            createdAt: s.created_at,
-          })),
-        ),
-      )
-      .catch(() => {
-        // silently fail — sidebar sessions are non-critical
-      });
+    function fetchSessions() {
+      listSessions()
+        .then((data) =>
+          setSessions(
+            data.slice(0, 10).map((s: any) => ({
+              sessionId: s.session_id,
+              title: s.title,
+              createdAt: s.created_at,
+            })),
+          ),
+        )
+        .catch(() => {
+          // silently fail — sidebar sessions are non-critical
+        });
+    }
+
+    fetchSessions();
+
+    // Refresh when a new session is created from ChatPage
+    window.addEventListener('session-created', fetchSessions);
+    return () => window.removeEventListener('session-created', fetchSessions);
   }, []);
 
   const sessionListNode = <SessionList sessions={sessions} />;

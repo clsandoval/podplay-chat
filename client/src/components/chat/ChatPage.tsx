@@ -24,6 +24,15 @@ function nextId() {
   return `msg-${++messageCounter}-${Date.now()}`;
 }
 
+// Module-level state — survives component remount across route transitions.
+// Stores messages + SSE state when navigating from / → /chat/$sessionId so
+// the new mount can restore them instead of flashing empty.
+let handoffState: {
+  sessionId: string;
+  messages: Message[];
+  seenIds: Set<string>;
+} | null = null;
+
 export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -42,14 +51,24 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
   const pendingSendRef = useRef(0);
-  const historyEventIdsRef = useRef<Set<string> | null>(null);
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
 
   // Reset state when switching between sessions (same route, different params)
   useEffect(() => {
+    // Restore from handoff when navigating after session creation
+    if (handoffState && initialSessionId === handoffState.sessionId) {
+      setMessages(handoffState.messages);
+      seenEventIdsRef.current = handoffState.seenIds;
+      setSessionId(initialSessionId);
+      handoffState = null;
+      return;
+    }
+    handoffState = null;
+
     setMessages([]);
     setSessionStatus(null);
     currentAgentMessageRef.current = null;
-    historyEventIdsRef.current = null;
+    seenEventIdsRef.current = new Set();
     setSessionId(initialSessionId ?? null);
   }, [initialSessionId]);
 
@@ -66,8 +85,11 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
   // logic. Pattern: set the ref BEFORE calling setMessages.
   const handleEvent = useCallback(
     (event: AgentEvent) => {
-      // Skip SSE replays of events already loaded from history
-      if (event.id && historyEventIdsRef.current?.has(event.id)) return;
+      // Skip any event we've already processed (history or SSE replay)
+      if (event.id) {
+        if (seenEventIdsRef.current.has(event.id)) return;
+        seenEventIdsRef.current.add(event.id);
+      }
 
       switch (event.type) {
         // Handle user.message echo from SSE (needed after route remount
@@ -249,7 +271,8 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
     if (!initialSessionId) return;
 
     if (fresh) {
-      // Fresh session: SSE stream will deliver user.message echo + agent response
+      // Fresh session — SSE connection from handleSend didn't survive remount,
+      // but handoff restored messages so reconnecting won't flash.
       connectTo(initialSessionId);
       return;
     }
@@ -264,11 +287,9 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         const attQueue = [...historyAttachments];
 
         // Track known event IDs so SSE handler skips replayed events
-        const knownIds = new Set<string>();
         for (const event of history) {
-          if (event.id) knownIds.add(event.id);
+          if (event.id) seenEventIdsRef.current.add(event.id);
         }
-        historyEventIdsRef.current = knownIds;
 
         for (const event of history) {
           if (event.type === 'user.message') {
@@ -464,6 +485,17 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
         }
 
         await sendMessage(newId, text, attachments);
+
+        // Stash current state so the new route mount can restore it
+        // instead of flashing empty → repopulated.
+        handoffState = {
+          sessionId: newId,
+          messages: [...messages, userMsg],
+          seenIds: new Set(seenEventIdsRef.current),
+        };
+
+        // Notify sidebar to refresh session list
+        window.dispatchEvent(new CustomEvent('session-created'));
 
         void navigate({
           to: '/chat/$sessionId',
