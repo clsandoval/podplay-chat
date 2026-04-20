@@ -16,33 +16,63 @@ export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected';
 
 /**
  * SSE hook — caller is responsible for calling connectTo(sessionId).
- * No auto-connect: avoids duplicate connections from React StrictMode
- * and from racing with explicit connectTo calls in handleSend.
+ * Events are buffered and delivered once per animation frame via onEvents.
  */
 export function useEventStream(
-  onEvent: (event: AgentEvent) => void,
+  onEvents: (events: AgentEvent[]) => void,
 ) {
   const eventSourceRef = useRef<EventSource | null>(null);
-  const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
+  const onEventsRef = useRef(onEvents);
+  onEventsRef.current = onEvents;
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>('disconnected');
-  // Guards against concurrent async connectTo calls leaking EventSources
   const connectGenRef = useRef(0);
+
+  const bufferRef = useRef<AgentEvent[]>([]);
+  const rafRef = useRef<number | null>(null);
+  const seenIdsRef = useRef<Set<string>>(new Set());
+
+  const cancelPending = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    bufferRef.current = [];
+  }, []);
+
+  const flush = useCallback(() => {
+    rafRef.current = null;
+    const batch = bufferRef.current;
+    bufferRef.current = [];
+    if (batch.length > 0) onEventsRef.current(batch);
+  }, []);
+
+  const schedule = useCallback((event: AgentEvent) => {
+    if (event.id) {
+      if (seenIdsRef.current.has(event.id)) return;
+      seenIdsRef.current.add(event.id);
+    }
+    bufferRef.current.push(event);
+    if (rafRef.current === null) {
+      rafRef.current = requestAnimationFrame(flush);
+    }
+  }, [flush]);
 
   const close = useCallback(() => {
     connectGenRef.current++;
+    cancelPending();
     if (eventSourceRef.current) {
       console.log('[SSE] Closing connection');
       eventSourceRef.current.close();
       eventSourceRef.current = null;
     }
     setConnectionStatus('disconnected');
-  }, []);
+  }, [cancelPending]);
 
-  // Connect to a specific session — returns a promise that resolves when open
   const connectTo = useCallback(async (sid: string): Promise<void> => {
     close();
+    // close() bumped the gen; reset seen set for the new session.
+    seenIdsRef.current = new Set();
 
     const gen = connectGenRef.current;
     setConnectionStatus('connecting');
@@ -50,7 +80,6 @@ export function useEventStream(
 
     const { data } = await supabase.auth.getSession();
 
-    // Another connectTo was called while we awaited — bail out
     if (gen !== connectGenRef.current) {
       console.log('[SSE] Stale connect, aborting');
       return;
@@ -81,8 +110,7 @@ export function useEventStream(
       es.onmessage = (e) => {
         try {
           const event: AgentEvent = JSON.parse(e.data);
-          console.log(`[SSE] ${event.type}`);
-          onEventRef.current(event);
+          schedule(event);
         } catch {
           // ignore non-JSON
         }
@@ -96,16 +124,24 @@ export function useEventStream(
 
       eventSourceRef.current = es;
     });
-  }, [close]);
+  }, [close, schedule]);
 
-  // Clean up on unmount only
   useEffect(() => {
     return () => close();
   }, [close]);
+
+  /**
+   * Seed dedupe from externally-known event IDs (e.g. events returned from
+   * a history fetch). Call before connectTo so replayed events are filtered.
+   */
+  const seedSeenIds = useCallback((ids: Iterable<string>) => {
+    for (const id of ids) seenIdsRef.current.add(id);
+  }, []);
 
   return {
     connectionStatus,
     connectTo,
     close,
+    seedSeenIds,
   };
 }
