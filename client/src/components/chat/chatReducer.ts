@@ -33,6 +33,13 @@ export function chatReducer(state: ChatState, action: Action): ChatState {
   switch (action.kind) {
     case 'reset':
       return initialState;
+    case 'user_send':
+      return {
+        ...state,
+        messages: [...state.messages, action.message],
+        draft: null,
+        pendingSends: state.pendingSends + 1,
+      };
     default:
       return state;
   }

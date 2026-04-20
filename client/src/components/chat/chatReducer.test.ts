@@ -24,4 +24,28 @@ describe('chatReducer', () => {
       expect(chatReducer(dirty, { kind: 'reset' })).toEqual(initialState);
     });
   });
+
+  describe('user_send action', () => {
+    it('appends message, increments pendingSends, clears draft', () => {
+      const start = {
+        ...initialState,
+        draft: { id: 'draft-1', content: 'partial', toolUses: [] },
+        pendingSends: 0,
+      };
+      const msg = { id: 'u1', role: 'user' as const, content: 'hello' };
+      const next = chatReducer(start, { kind: 'user_send', message: msg });
+      expect(next.messages).toEqual([msg]);
+      expect(next.draft).toBeNull();
+      expect(next.pendingSends).toBe(1);
+    });
+
+    it('increments pendingSends cumulatively', () => {
+      let s = { ...initialState, pendingSends: 3 };
+      s = chatReducer(s, {
+        kind: 'user_send',
+        message: { id: 'u1', role: 'user', content: 'a' },
+      });
+      expect(s.pendingSends).toBe(4);
+    });
+  });
 });
