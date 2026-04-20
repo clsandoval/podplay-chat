@@ -89,6 +89,15 @@ function applyEvent(state: ChatState, event: AgentEvent): ChatState {
       };
       return { ...state, messages: [...state.messages, msg] };
     }
+    case 'agent.message': {
+      const text = textFromBlocks(event.content);
+      if (!text && !state.draft) return state;
+      const draft = state.draft ?? newDraft();
+      return {
+        ...state,
+        draft: { ...draft, content: draft.content + text },
+      };
+    }
     default:
       return state;
   }

@@ -109,4 +109,39 @@ describe('chatReducer', () => {
       expect(next.messages[0].content).toBe('hello world');
     });
   });
+
+  describe('events: agent.message', () => {
+    it('creates a draft on first agent.message', () => {
+      const evt = {
+        type: 'agent.message',
+        id: 'e1',
+        content: [{ type: 'text', text: 'Hello' }],
+      };
+      const next = chatReducer(initialState, { kind: 'events', events: [evt] });
+      expect(next.draft).not.toBeNull();
+      expect(next.draft!.content).toBe('Hello');
+      expect(next.draft!.toolUses).toEqual([]);
+      expect(next.messages).toEqual([]);
+    });
+
+    it('accumulates text from multiple agent.message events into the same draft', () => {
+      const events = [
+        { type: 'agent.message', id: 'e1', content: [{ type: 'text', text: 'Hel' }] },
+        { type: 'agent.message', id: 'e2', content: [{ type: 'text', text: 'lo ' }] },
+        { type: 'agent.message', id: 'e3', content: [{ type: 'text', text: 'world' }] },
+      ];
+      const next = chatReducer(initialState, { kind: 'events', events });
+      expect(next.draft!.content).toBe('Hello world');
+    });
+
+    it('does not change messages array identity when only draft changes', () => {
+      const start = {
+        ...initialState,
+        messages: [{ id: 'u1', role: 'user' as const, content: 'hi' }],
+      };
+      const evt = { type: 'agent.message', id: 'e1', content: [{ type: 'text', text: 'hey' }] };
+      const next = chatReducer(start, { kind: 'events', events: [evt] });
+      expect(next.messages).toBe(start.messages); // reference-identity preserved
+    });
+  });
 });
