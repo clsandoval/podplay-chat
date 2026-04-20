@@ -61,6 +61,12 @@ export function ChatPage({ sessionId: initialSessionId, fresh }: ChatPageProps) 
       const el = scrollContainerRef.current;
       if (el) el.scrollTop = el.scrollHeight;
     });
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
   }, [state.messages, state.draft]);
 
   const [isCreatingSession, setIsCreatingSession] = useState(false);

@@ -143,6 +143,23 @@ describe('chatReducer', () => {
       const next = chatReducer(start, { kind: 'events', events: [evt] });
       expect(next.messages).toBe(start.messages); // reference-identity preserved
     });
+
+    it('interleaves agent.message + tool_use + agent.message into one draft', () => {
+      const events = [
+        { type: 'agent.message', id: 'a1', content: [{ type: 'text', text: 'Thinking... ' }] },
+        { type: 'agent.tool_use', id: 't1', name: 'search', input: { q: 'x' } },
+        { type: 'agent.tool_result', id: 'r1', content: 'result data' },
+        { type: 'agent.message', id: 'a2', content: [{ type: 'text', text: 'Here is the answer.' }] },
+      ];
+      const next = chatReducer(initialState, { kind: 'events', events });
+      expect(next.draft).not.toBeNull();
+      expect(next.draft!.content).toBe('Thinking... Here is the answer.');
+      expect(next.draft!.toolUses).toHaveLength(1);
+      expect(next.draft!.toolUses[0].name).toBe('search');
+      expect(next.draft!.toolUses[0].result).toBe('result data');
+      expect(next.messages).toEqual([]);
+      expect(next.sessionStatus).toBeNull();
+    });
   });
 
   describe('events: tool_use / tool_result', () => {
