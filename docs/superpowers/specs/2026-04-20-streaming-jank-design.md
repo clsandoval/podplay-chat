@@ -66,16 +66,24 @@ type ChatState = {
   messages: Message[];       // committed turns only
   draft: Draft | null;
   sessionStatus: 'idle' | 'running' | 'terminated' | null;
+  pendingSends: number;      // count of optimistic user messages awaiting echo
 };
 
 type Action =
-  | { kind: 'events'; events: AgentEvent[] }        // batched from rAF
+  | { kind: 'events'; events: AgentEvent[] }        // batched from rAF, already deduped
   | { kind: 'restore'; messages: Message[] }         // history load, one-shot
   | { kind: 'user_send'; message: Message }          // optimistic local append
   | { kind: 'reset' };                               // session switch
 ```
 
-`seenEventIds` stays in a `useRef` (dedupe is a side-concern, not state).
+**Dedupe lives outside the reducer.** `seenEventIds` stays in a `useRef`; the rAF flush filters out events with IDs already seen before calling `dispatch({ kind: 'events', events })`. The reducer treats its input as authoritative.
+
+**Action semantics:**
+
+- `user_send` → append `message` to `messages`, increment `pendingSends`, set `draft = null` (new turn starting).
+- `restore` → replace `messages`, null `draft`, reset `pendingSends = 0`, `sessionStatus = 'idle'`.
+- `reset` → return initial state (empty messages, null draft, null status, 0 pending). Used on session switch or unmount.
+- `events` → see table below.
 
 ### Reducer — `events` action
 
@@ -83,7 +91,7 @@ Applied in order over the batch:
 
 | Event | Effect |
 |---|---|
-| `user.message` | Skip if `pendingSendRef` > 0 (echo of optimistic send); else append to `messages` |
+| `user.message` | If `pendingSends > 0`, decrement and skip (echo of optimistic send); else append to `messages` |
 | `agent.message` | `draft ??= newDraft()`; append text to `draft.content` |
 | `agent.tool_use` / `mcp_tool_use` | `draft ??= newDraft()`; push to `draft.toolUses` |
 | `agent.tool_result` / `mcp_tool_result` | Mutate *only the last* entry in `draft.toolUses`; other entries keep identity |
@@ -93,6 +101,10 @@ Applied in order over the batch:
 | `session.status_terminated` | Commit draft (if any), `sessionStatus = 'terminated'` |
 | `session.error` | Push system message with error |
 
+Unknown event types are ignored.
+
+**Draft ID** is generated locally via the existing `nextId()` helper when the draft is first created — not pulled from any event. The draft's identity is a UI concern (React key), not a CMA event id.
+
 ### Identity rules
 
 Critical for `React.memo` to pay off:
@@ -100,6 +112,10 @@ Critical for `React.memo` to pay off:
 - Committed `messages` gets a new array reference *only* when a new message is added (user send, draft commit, restore, system message).
 - During streaming, `messages` identity is stable — no `.map()`, no spread.
 - `draft` is a single object rebuilt per frame; `<StreamingBubble>` always rerenders. Cheap because it's one component, not a list.
+
+## History restore
+
+The existing event-to-messages mapping in `ChatPage.tsx` (attachment queue that pairs image/document blocks with uploaded attachment records, server-injected text-block detection, agent-turn aggregation) is preserved verbatim — just moved into a helper `eventsToMessages(events, attachments): Message[]` so it can be unit-tested. The component still calls `getHistory()` and passes the result through this helper, then dispatches `{ kind: 'restore', messages }`. All event IDs from history are added to `seenEventIds` before SSE connects, so replay is filtered.
 
 ## Event batching
 
@@ -151,7 +167,7 @@ New:
 - `MessageBubble` → `React.memo(MessageBubble)`. Default shallow-equal works because committed messages preserve identity.
 - `ToolUseBlock` → `React.memo`, same reasoning.
 - `StreamingBubble` → not memoized; rerenders on every `draft` change.
-- `ChatInput` → `React.memo` + `useCallback` for `handleSend`. `inputDisabled` derived from `sessionStatus` + `isCreatingSession`, which rarely change mid-turn.
+- `ChatInput` → `React.memo` + a truly stable `handleSend`. The current `handleSend` closes over `messages`, `sessionId`, and `user`, so `useCallback` alone would rebuild it on every draft change. Pattern: keep `handleSend` as a single `useCallback` with no dependencies; read mutable values through refs (`sessionIdRef`, `userRef`, reducer state via `stateRef` updated in a `useEffect`). `inputDisabled` is a small prop that only changes on `sessionStatus` / `isCreatingSession` — acceptable.
 - `MessageList` → split into its own memoized component so `ChatPage`'s rerenders (draft updates) don't traverse the list.
 
 Equality gotchas:
@@ -183,6 +199,12 @@ Equality gotchas:
 - `useEventStream` hook keeps its shape; rAF batching added inside.
 - `ChatPage.tsx` gets the reducer + structural split — expect ~300 lines rewritten.
 - `server/src/lib/session-manager.ts` left alone. The server-side `fetch` has Node's default 60s read timeout, which can tear the SSE stream during long model turns (daimon-cma sets `read=None` for this reason). Revisit separately if client fixes don't fully resolve jank.
+
+## Preserved as-is
+
+- **`handoffState` module-level variable** (`ChatPage.tsx:30-34`) — bridges the `/` → `/chat/$sessionId` navigation so the new route mount restores messages instead of flashing empty. Orthogonal to the jank fix. Update the handoff shape to include `draft` and `pendingSends` alongside `messages`, otherwise untouched.
+- Existing SSE reconnection logic in `server/src/lib/session-manager.ts`.
+- `useEventStream`'s connection-lifecycle / gen-guard logic. Only the message handler changes (adds rAF batching).
 
 ## Out of scope
 
