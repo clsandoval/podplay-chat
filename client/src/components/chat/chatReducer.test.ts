@@ -68,4 +68,45 @@ describe('chatReducer', () => {
       expect(next.sessionStatus).toBe('idle');
     });
   });
+
+  describe('events: user.message', () => {
+    it('appends when no pending sends', () => {
+      const evt = {
+        type: 'user.message',
+        id: 'e1',
+        content: [{ type: 'text', text: 'hi' }],
+      };
+      const next = chatReducer(initialState, { kind: 'events', events: [evt] });
+      expect(next.messages).toHaveLength(1);
+      expect(next.messages[0].content).toBe('hi');
+      expect(next.messages[0].role).toBe('user');
+      expect(next.pendingSends).toBe(0);
+    });
+
+    it('decrements pendingSends and skips when echoing an optimistic send', () => {
+      const start = { ...initialState, pendingSends: 2 };
+      const evt = {
+        type: 'user.message',
+        id: 'e1',
+        content: [{ type: 'text', text: 'hi' }],
+      };
+      const next = chatReducer(start, { kind: 'events', events: [evt] });
+      expect(next.messages).toHaveLength(0);
+      expect(next.pendingSends).toBe(1);
+    });
+
+    it('extracts text from text blocks only', () => {
+      const evt = {
+        type: 'user.message',
+        id: 'e1',
+        content: [
+          { type: 'text', text: 'hello ' },
+          { type: 'image', source: { data: 'abc' } },
+          { type: 'text', text: 'world' },
+        ],
+      };
+      const next = chatReducer(initialState, { kind: 'events', events: [evt] });
+      expect(next.messages[0].content).toBe('hello world');
+    });
+  });
 });

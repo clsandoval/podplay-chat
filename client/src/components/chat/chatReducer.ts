@@ -29,6 +29,21 @@ export const initialState: ChatState = {
   pendingSends: 0,
 };
 
+function textFromBlocks(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((c): c is { type: 'text'; text: string } =>
+      typeof c === 'object' && c !== null && (c as any).type === 'text' && typeof (c as any).text === 'string',
+    )
+    .map((c) => c.text)
+    .join('');
+}
+
+let draftCounter = 0;
+function newDraft(): Draft {
+  return { id: `draft-${++draftCounter}-${Date.now()}`, content: '', toolUses: [] };
+}
+
 export function chatReducer(state: ChatState, action: Action): ChatState {
   switch (action.kind) {
     case 'reset':
@@ -47,6 +62,33 @@ export function chatReducer(state: ChatState, action: Action): ChatState {
         sessionStatus: 'idle',
         pendingSends: 0,
       };
+    case 'events': {
+      let s = state;
+      for (const event of action.events) {
+        s = applyEvent(s, event);
+      }
+      return s;
+    }
+    default:
+      return state;
+  }
+}
+
+function applyEvent(state: ChatState, event: AgentEvent): ChatState {
+  switch (event.type) {
+    case 'user.message': {
+      if (state.pendingSends > 0) {
+        return { ...state, pendingSends: state.pendingSends - 1 };
+      }
+      const text = textFromBlocks(event.content);
+      if (!text) return state;
+      const msg: Message = {
+        id: event.id ?? `msg-${Date.now()}`,
+        role: 'user',
+        content: text,
+      };
+      return { ...state, messages: [...state.messages, msg] };
+    }
     default:
       return state;
   }
