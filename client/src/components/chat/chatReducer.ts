@@ -40,6 +40,13 @@ export function chatReducer(state: ChatState, action: Action): ChatState {
         draft: null,
         pendingSends: state.pendingSends + 1,
       };
+    case 'restore':
+      return {
+        messages: action.messages,
+        draft: null,
+        sessionStatus: 'idle',
+        pendingSends: 0,
+      };
     default:
       return state;
   }

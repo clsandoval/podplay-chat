@@ -48,4 +48,24 @@ describe('chatReducer', () => {
       expect(s.pendingSends).toBe(4);
     });
   });
+
+  describe('restore action', () => {
+    it('replaces messages, nulls draft, resets pendingSends, sets idle', () => {
+      const dirty = {
+        messages: [{ id: 'old', role: 'user' as const, content: 'old' }],
+        draft: { id: 'd', content: 'x', toolUses: [] },
+        sessionStatus: 'running' as const,
+        pendingSends: 2,
+      };
+      const restored = [
+        { id: 'r1', role: 'user' as const, content: 'a' },
+        { id: 'r2', role: 'agent' as const, content: 'b', toolUses: [] },
+      ];
+      const next = chatReducer(dirty, { kind: 'restore', messages: restored });
+      expect(next.messages).toBe(restored);
+      expect(next.draft).toBeNull();
+      expect(next.pendingSends).toBe(0);
+      expect(next.sessionStatus).toBe('idle');
+    });
+  });
 });
