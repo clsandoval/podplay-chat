@@ -35,6 +35,7 @@ ChatPage (container)
 │       messages: Message[]       // committed turns (user + completed agent)
 │       draft: Draft | null        // in-progress agent turn
 │       sessionStatus: ...
+│       pendingSends: number       // optimistic sends awaiting user.message echo
 │     }
 ├── event pipeline
 │     SSE onmessage → bufferRef.push(event)
@@ -91,10 +92,10 @@ Applied in order over the batch:
 
 | Event | Effect |
 |---|---|
-| `user.message` | If `pendingSends > 0`, decrement and skip (echo of optimistic send); else append to `messages` |
-| `agent.message` | `draft ??= newDraft()`; append text to `draft.content` |
-| `agent.tool_use` / `mcp_tool_use` | `draft ??= newDraft()`; push to `draft.toolUses` |
-| `agent.tool_result` / `mcp_tool_result` | Mutate *only the last* entry in `draft.toolUses`; other entries keep identity |
+| `user.message` | If `pendingSends > 0`, decrement and skip (echo of optimistic send); else append to `messages`. **Note:** this replaces the current content-equality dedupe, which incorrectly collapses two identical consecutive user sends into one. |
+| `agent.message` | `draft ??= newDraft()`; extract text from `content` blocks where `c.type === 'text'`, concatenate, append to `draft.content` |
+| `agent.tool_use` / `mcp_tool_use` | `draft ??= newDraft()`; push new ToolUse to `draft.toolUses` |
+| `agent.tool_result` / `mcp_tool_result` | Return a new `draft.toolUses` array: all entries except the last keep their identity by reference; the last entry is replaced with `{...last, result: event.content}`. Reducer does not mutate. |
 | `session.status_running` | `sessionStatus = 'running'` |
 | `session.status_idle` (`end_turn`) | Commit: push `draft` into `messages`, set `draft = null`, `sessionStatus = 'idle'` |
 | `session.status_idle` (`requires_action` / `retries_exhausted`) | Commit draft (if any), push system message, idle |
@@ -156,17 +157,19 @@ Current: `scrollIntoView({ behavior: 'smooth' })` on every messages/draft change
 
 New:
 
-- Track `isPinnedToBottom` via a scroll listener on the message container — true if user is within ~80px of bottom.
+- Track `isPinnedToBottom` via a `{ passive: true }` scroll listener on the message container — true if user is within ~80px of bottom.
 - On new content:
   - **Pinned →** scroll to bottom instantly (no smooth), rAF-throttled so multiple updates in a frame scroll once.
   - **Not pinned →** don't scroll. Show a floating "↓ N new messages" pill anchored above the input; clicking jumps to bottom.
 - On user send → always pin + scroll.
 
+**Typing indicator:** the existing `<TypingIndicator />` shows when `sessionStatus === 'running'`. Now that the streaming draft itself renders as a live bubble, the indicator is only needed *before* the first `agent.message` arrives. Render condition becomes `sessionStatus === 'running' && !draft`.
+
 ## Memoization
 
 - `MessageBubble` → `React.memo(MessageBubble)`. Default shallow-equal works because committed messages preserve identity.
 - `ToolUseBlock` → `React.memo`, same reasoning.
-- `StreamingBubble` → not memoized; rerenders on every `draft` change.
+- `StreamingBubble` → not memoized; rerenders on every `draft` change. Rendered as `<MessageBubble message={draftToMessage(draft)} />` — `draftToMessage` wraps the Draft into a Message shape (role: 'agent', plus content and toolUses). Avoids duplicating the bubble render logic. Given explicitly from its own state slot so it never shares array identity with committed messages.
 - `ChatInput` → `React.memo` + a truly stable `handleSend`. The current `handleSend` closes over `messages`, `sessionId`, and `user`, so `useCallback` alone would rebuild it on every draft change. Pattern: keep `handleSend` as a single `useCallback` with no dependencies; read mutable values through refs (`sessionIdRef`, `userRef`, reducer state via `stateRef` updated in a `useEffect`). `inputDisabled` is a small prop that only changes on `sessionStatus` / `isCreatingSession` — acceptable.
 - `MessageList` → split into its own memoized component so `ChatPage`'s rerenders (draft updates) don't traverse the list.
 
